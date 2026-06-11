@@ -1,0 +1,113 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE SECURITY PRIMITIVES ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'ekifebriann16@gmail.com' ||
+        request.auth.token.email == 'admin@admin.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isSurveyor() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/surveyors/$(request.auth.uid)) ||
+        request.auth.token.email == 'kahwin1@lxvoip.com'
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- VALIDATION BLUEPRINTS ---
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'createdAt']) &&
+             data.keys().size() == 2 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidBuilding(data) {
+      return data.name is string && data.name.size() > 0 &&
+             data.category is string && data.category.size() > 0 &&
+             data.createdBy is string && data.createdBy.size() > 0;
+    }
+
+    function isValidAdminDoc(data) {
+      return data.keys().hasAll(['email', 'name', 'createdAt']) &&
+             data.keys().size() == 3 &&
+             data.email is string && data.email.size() > 0 && data.email.size() <= 200 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.createdAt == request.time;
+    }
+
+    // --- COLLECTION RULES ---
+
+    // Admins Collection
+    // Admins can see who the other admins are. Self-registration is allowed for the logged in user under their own UID.
+    match /admins/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidId(userId) && (
+        (request.auth.uid == userId && isValidAdminDoc(incoming()) && (request.auth.token.email == null || incoming().email == request.auth.token.email)) ||
+        (isAdmin() && isValidAdminDoc(incoming()))
+      );
+      allow update: if isAdmin() && isValidId(userId) && isValidAdminDoc(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid; // prevent deleting yourself
+    }
+
+    // Categories Collection
+    // Categories are readable by anyone, modifiable only by admins
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow create: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming());
+      allow update: if isAdmin() && isValidId(categoryId) && isValidCategory(incoming()) && incoming().createdAt == existing().createdAt;
+      allow delete: if isAdmin() && isValidId(categoryId);
+    }
+
+    // Surveyors Collection
+    // Surveyors are readable by anyone, modifiable only by admins
+    match /surveyors/{surveyorId} {
+      allow read: if true;
+      allow create, update: if isAdmin() || (isSignedIn() && request.auth.uid == surveyorId);
+      allow delete: if isAdmin() && isValidId(surveyorId);
+    }
+
+    // Buildings Collection
+    // Buildings are readable by admins, and by surveyors only if they created them
+    match /buildings/{buildingId} {
+      allow read: if isAdmin() || (isSurveyor() && resource.data.createdBy == request.auth.uid);
+      allow create: if (isAdmin() || isSurveyor()) && isValidId(buildingId) && isValidBuilding(incoming()) && 
+                    incoming().createdBy == request.auth.uid &&
+                    incoming().createdAt == request.time &&
+                    incoming().updatedAt == request.time;
+      allow update: if (isAdmin() || (isSurveyor() && existing().createdBy == request.auth.uid)) && 
+                    isValidId(buildingId) && isValidBuilding(incoming()) &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().updatedAt == request.time &&
+                    incoming().createdBy == existing().createdBy;
+      allow delete: if isAdmin() || (isSurveyor() && existing().createdBy == request.auth.uid);
+    }
+  }
+}

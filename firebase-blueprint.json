@@ -1,0 +1,99 @@
+{
+  "entities": {
+    "Admin": {
+      "title": "Admin",
+      "description": "Registered administrator accounts",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "description": "Admin email address"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the admin"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["email", "name", "createdAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Building categories like Akademik, Administrasi, Fasilitas",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the category"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        }
+      },
+      "required": ["name", "createdAt"]
+    },
+    "Building": {
+      "title": "Building",
+      "description": "Information and photo gallery of a specific building",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Name of the building"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category name or ID"
+        },
+        "description": {
+          "type": "string",
+          "description": "Detailed description of the building"
+        },
+        "location": {
+          "type": "string",
+          "description": "Building location or Address"
+        },
+        "floors": {
+          "type": "integer",
+          "description": "Number of floors in the building"
+        },
+        "gallery": {
+          "type": "array",
+          "description": "List of photo URLs"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdBy": {
+          "type": "string"
+        }
+      },
+      "required": ["name", "category", "description", "location", "floors", "gallery", "createdAt", "updatedAt", "createdBy"]
+    }
+  },
+  "firestore": {
+    "admins/{userId}": {
+      "schema": "Admin",
+      "description": "List of administrators"
+    },
+    "categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Building categories"
+    },
+    "buildings/{buildingId}": {
+      "schema": "Building",
+      "description": "Detailed list of campus/site buildings"
+    }
+  }
+}

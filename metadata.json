@@ -1,0 +1,6 @@
+{
+  "name": "LXVOIP DATABASE",
+  "description": "Lx集团多维运营数据中心管理系统 - Terminal Manajemen Pusat Data Komprehensif LX Group (Survei, Pengukuran, dan Instalasi)",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
