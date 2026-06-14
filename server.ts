@@ -4,11 +4,11 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
-import { doc, setDoc, query, collection, where, getDocs, serverTimestamp } from "firebase/firestore";
+import { doc, setDoc, getDoc, query, collection, where, getDocs, serverTimestamp } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage, auth } from "./src/firebase";
 import dotenv from "dotenv";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
+import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInAnonymously } from "firebase/auth";
 import { getApps, initializeApp, getApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, FieldValue, Firestore } from "firebase-admin/firestore";
@@ -303,8 +303,9 @@ async function getTelegramSession(chatId: string | number): Promise<any> {
     return authenticatedSessions[cidStr];
   }
   try {
-    const docSnap = await adminDb.collection("telegram_sessions").doc(cidStr).get();
-    if (docSnap.exists) {
+    const docRef = doc(db, "telegram_sessions", cidStr);
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
       const data = docSnap.data();
       authenticatedSessions[cidStr] = data;
       return data;
@@ -376,22 +377,25 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
     let categoryFound: 'surveyor' | 'admin' = 'surveyor';
 
     try {
-      // Look up in surveyors
-      const snapSurveyorEmail = await adminDb.collection("surveyors").where("email", "==", input).get();
+      // Look up in surveyors using standard query and getDocs from Client SDK
+      const qEmail = query(collection(db, "surveyors"), where("email", "==", input));
+      const snapSurveyorEmail = await getDocs(qEmail);
       if (!snapSurveyorEmail.empty) {
         matchedSurveyor = snapSurveyorEmail.docs[0].data();
         matchedSurveyorId = snapSurveyorEmail.docs[0].id;
       } else {
-        const snapSurveyorPhone = await adminDb.collection("surveyors").where("phone", "==", input).get();
+        const qPhone = query(collection(db, "surveyors"), where("phone", "==", input));
+        const snapSurveyorPhone = await getDocs(qPhone);
         if (!snapSurveyorPhone.empty) {
           matchedSurveyor = snapSurveyorPhone.docs[0].data();
           matchedSurveyorId = snapSurveyorPhone.docs[0].id;
         }
       }
 
-      // If not found, look up in admins
+      // If not found, look up in admins using standard query and getDocs from Client SDK
       if (!matchedSurveyor) {
-        const snapAdminEmail = await adminDb.collection("admins").where("email", "==", input).get();
+        const qAdmin = query(collection(db, "admins"), where("email", "==", input));
+        const snapAdminEmail = await getDocs(qAdmin);
         if (!snapAdminEmail.empty) {
           matchedSurveyor = snapAdminEmail.docs[0].data();
           matchedSurveyorId = snapAdminEmail.docs[0].id;
@@ -401,15 +405,16 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
 
       if (matchedSurveyor) {
         const name = matchedSurveyor.name || "Staff";
-        // Save the Telegram mapping into firestore for persistence via admin SDK
-        await adminDb.collection("telegram_sessions").doc(String(chatId)).set({
+        // Save the Telegram mapping into firestore for persistence via Client SDK
+        const sessionRef = doc(db, "telegram_sessions", String(chatId));
+        await setDoc(sessionRef, {
           chatId,
           name,
           email: matchedSurveyor.email || "",
           phone: matchedSurveyor.phone || "",
           role: categoryFound,
           userUid: matchedSurveyorId,
-          linkedAt: FieldValue.serverTimestamp()
+          linkedAt: serverTimestamp()
         }, { merge: true });
 
         // Update local memory cache
@@ -430,9 +435,9 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
       } else {
         await sendTelegramMessage(chatId, `❌ Akun "${input}" tidak terdaftar di sistem. Harap hubungi administrator pusat untuk mendaftarkan akun Surveyor Anda terlebih dahulu.`, token);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Auth query issue:", err);
-      await sendTelegramMessage(chatId, `⚠️ Terjadi kesalahan internal database saat mendaftarkan sesi. Hubungi teknisi kami.`, token);
+      await sendTelegramMessage(chatId, `⚠️ Terjadi kesalahan internal database saat mendaftarkan sesi. Hubungi teknisi kami. Detail Error: ${err.message || err}`, token);
     }
     return;
   }
@@ -475,7 +480,17 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         return;
       }
 
-      // Store in Firebase Storage using the authenticated Client SDK (bypasses unauthenticated storage rules)
+      // Ensure the backend has an authenticated Firebase session (Anonymous) so Firebase Storage security rules are satisfied.
+      if (!auth.currentUser) {
+        try {
+          await signInAnonymously(auth);
+          console.log("[Firebase Storage Upload] Authenticated anonymously to permit secure writes");
+        } catch (authErr) {
+          console.warn("[Firebase Storage Upload] Anonymous login failed/skipped, attempting upload anyway:", authErr);
+        }
+      }
+
+      // Store in Firebase Storage using the Client SDK
       const userUid = auth.currentUser?.uid || "telegram";
       const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
       const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
@@ -500,13 +515,13 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
       // Set the uploaded gallery file
       parsedRecord.gallery = [mediaUrl];
 
-      // Save record in Firestore via superuser admin SDK to avoid permission_denied or credential synchronization delays
+      // Save record in Firestore via Client SDK to avoid telemetry & credential dependency issue
       const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      
-      await adminDb.collection("buildings").doc(finalRecordId).set({
+      const buildingRef = doc(db, "buildings", finalRecordId);
+      await setDoc(buildingRef, {
         ...parsedRecord,
-        updatedAt: FieldValue.serverTimestamp(),
-        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
         createdBy: activeSession.userUid || "telegram_" + chatId
       });
 
