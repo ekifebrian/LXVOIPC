@@ -13,7 +13,7 @@ import { getApps, initializeApp, getApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, FieldValue, Firestore } from "firebase-admin/firestore";
 import { getStorage } from "firebase-admin/storage";
-import { readFileSync } from "fs";
+import fs, { readFileSync } from "fs";
 
 dotenv.config();
 
@@ -97,6 +97,13 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Ensure the local uploads directory exists and is statically served as backup
+const uploadsDir = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+app.use("/uploads", express.static(uploadsDir));
 
 // API route to let the frontend know the Telegram Bot status
 app.get("/api/telegram-info", async (req, res) => {
@@ -532,14 +539,28 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         return;
       }
 
-            // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
-      await getClientAuth();
+      let mediaUrl = "";
+      try {
+        // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
+        await getClientAuth();
 
-      // Store in Firebase Storage using the Client SDK
-      const userUid = auth.currentUser?.uid || "telegram";
-      const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
-      const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
-      const mediaUrl = await getDownloadURL(uploadBytesResult.ref);
+        // Store in Firebase Storage using the Client SDK
+        const userUid = auth.currentUser?.uid || "telegram";
+        const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
+        const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
+        mediaUrl = await getDownloadURL(uploadBytesResult.ref);
+        console.log("[Media Upload] Uploaded successfully to Firebase Storage:", mediaUrl);
+      } catch (storageErr: any) {
+        console.warn("[Media Upload] Firebase Storage upload failed/unauthorized, falling back to local server storage:", storageErr.message || storageErr);
+        
+        // Save file locally on the container as robust fallback
+        const localPath = path.join(process.cwd(), "uploads", fileName);
+        fs.writeFileSync(localPath, Buffer.from(fileBuffer));
+        
+        const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+        mediaUrl = appUrl ? `${appUrl}/uploads/${fileName}` : `/uploads/${fileName}`;
+        console.log("[Media Upload] Stored and accessible locally:", mediaUrl);
+      }
 
       await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
 
