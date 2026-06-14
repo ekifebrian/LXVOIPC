@@ -3,7 +3,7 @@ import { db, auth, handleFirestoreError, OperationType, createAccountOnSecondary
 import { collection, doc, setDoc, deleteDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { ref, uploadBytesResumable, getDownloadURL } from 'firebase/storage';
 import { Building, Admin, Surveyor, GalleryItem } from '../types';
-import { Plus, Trash2, X, Check, Upload, User, Shield, Phone, Cpu, Hash, Clock, Landmark, Sparkles, Key, Mail, Compass, MapPin, Search } from 'lucide-react';
+import { Plus, Trash2, X, Check, Upload, User, Shield, Phone, Cpu, Hash, Clock, Landmark, Sparkles, Key, Mail, Compass, MapPin, Search, Send } from 'lucide-react';
 import { Language, translations } from '../languages';
 
 // Helper to check if a item is a video
@@ -88,13 +88,15 @@ export default function AdminPanel({
   const [opLongitude, setOpLongitude] = useState<number | undefined>(undefined);
   const [isGpsLoading, setIsGpsLoading] = useState(false);
 
+
+
   // Online Geocoding search states for form
   const [formSearchQuery, setFormSearchQuery] = useState('');
   const [formSearchResults, setFormSearchResults] = useState<any[]>([]);
   const [isSearchingFormAddress, setIsSearchingFormAddress] = useState(false);
   const [showFormSearchResults, setShowFormSearchResults] = useState(false);
 
-  // Debounce effect to search online locations via Nominatim
+  // Debounce effect to search online locations via Amap query proxy
   useEffect(() => {
     const query = formSearchQuery.trim();
     if (query.length < 2) {
@@ -105,42 +107,56 @@ export default function AdminPanel({
     const timer = setTimeout(async () => {
       setIsSearchingFormAddress(true);
       try {
-        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=6&accept-language=${lang === 'id' ? 'id,en' : 'zh,en'}`;
+        const url = `/api/amap/search?q=${encodeURIComponent(query)}`;
         const response = await fetch(url);
         const data = await response.json();
-        if (Array.isArray(data)) {
-          setFormSearchResults(data);
+        if (data && Array.isArray(data.results)) {
+          // Normalize display_name for rendering dropdown items seamlessly
+          const mapped = data.results.map((item: any) => ({
+            ...item,
+            display_name: item.description || ''
+          }));
+          setFormSearchResults(mapped);
+        } else {
+          setFormSearchResults([]);
         }
       } catch (err) {
-        console.error('Error fetching address coordinates:', err);
+        console.error('Error fetching address coordinates via Amap proxy:', err);
+        setFormSearchResults([]);
       } finally {
         setIsSearchingFormAddress(false);
       }
-    }, 650);
+    }, 500);
 
     return () => clearTimeout(timer);
-  }, [formSearchQuery, lang]);
+  }, [formSearchQuery]);
 
   const handleSelectAddressSuggestion = (item: any) => {
+    const details = item.addressDetails || {};
     const addr = item.address || {};
     
     // Extract state/province (favour state then province/region)
-    const province = addr.state || addr.province || addr.region || addr.governorate || '';
+    const province = details.province || addr.state || addr.province || addr.region || addr.governorate || '';
     // Extract city
-    const city = addr.city || addr.town || addr.municipality || addr.city_district || addr.local_administrative_area || '';
+    const city = details.city || addr.city || addr.town || addr.municipality || addr.city_district || addr.local_administrative_area || '';
     // Extract district
-    const district = addr.county || addr.district || addr.suburb || addr.island || addr.neighbourhood || addr.village || addr.croft || '';
+    const district = details.district || addr.county || addr.district || addr.suburb || addr.island || addr.neighbourhood || addr.village || addr.croft || '';
     
     setOpProvince(province);
     setOpCity(city);
     setOpDistrict(district);
     
-    if (item.lat) setOpLatitude(parseFloat(item.lat));
-    if (item.lon) setOpLongitude(parseFloat(item.lon));
+    if (Array.isArray(item.latlng)) {
+      setOpLatitude(item.latlng[0]);
+      setOpLongitude(item.latlng[1]);
+    } else {
+      if (item.lat) setOpLatitude(parseFloat(item.lat));
+      if (item.lon) setOpLongitude(parseFloat(item.lon));
+    }
     
     // If name is empty, auto fill with the top node name
     if (!recordName) {
-      const shortName = item.name || item.display_name.split(',')[0];
+      const shortName = item.name || (item.display_name ? item.display_name.split(',')[0] : '');
       setRecordName(shortName);
     }
     
@@ -219,22 +235,15 @@ export default function AdminPanel({
         setIsGpsLoading(false);
         
         try {
-          const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
-            headers: { 'Accept-Language': lang === 'id' ? 'id,en' : 'zh,en' }
-          });
+          const res = await fetch(`/api/amap/regeo?lat=${lat}&lng=${lng}`);
           if (res.ok) {
             const data = await res.json();
-            const addr = data.address || {};
-            const state = addr.state || addr.region || addr.province || '';
-            const city = addr.city || addr.municipality || addr.city_district || addr.county || '';
-            const county = addr.suburb || addr.neighbourhood || addr.village || addr.quarter || '';
-            
-            if (state) setOpProvince(state.replace(/Province|Kepulauan|Daerah Istimewa/gi, '').trim());
-            if (city) setOpCity(city.replace(/City|Kota|Kabupaten/gi, '').trim());
-            if (county) setOpDistrict(county.trim());
+            if (data.province) setOpProvince(data.province.replace(/Province|Kepulauan|Daerah Istimewa/gi, '').trim());
+            if (data.city) setOpCity(data.city.replace(/City|Kota|Kabupaten/gi, '').trim());
+            if (data.district) setOpDistrict(data.district.trim());
           }
         } catch (e) {
-          console.warn("Reverse geocoding with Nominatim failed, used coordinates fallback", e);
+          console.warn("Reverse geocoding with Amap/Gaode failed, used coordinates fallback", e);
         }
         
         alert(lang === 'id' 
@@ -1074,12 +1083,12 @@ export default function AdminPanel({
             </div>
             <div className="flex-grow min-w-0">
               <h4 className="font-sans font-black text-xs text-slate-800">
-                {lang === 'id' ? 'Pencarian Lokasi & Koordinat GPS Bumi' : '地球定位与精准 GPS 检索'}
+                {lang === 'id' ? 'Pencarian Lokasi GPS' : '在线地图 GPS 检索'}
               </h4>
               <p className="text-[10px] text-slate-500 mt-0.5 leading-relaxed">
                 {lang === 'id' 
-                  ? 'Masukkan nama kota, jalan, provinsi atau wilayah (cth: Shandong, Jiujiang, Jakarta) untuk mengarahkan & auto-fill koordinat GPS akurat.' 
-                  : '请输入城市名、道路、省份或区域（例如：山东省、九江市、雅加达）进行精准经纬度一键检索并自动填充。'}
+                  ? 'Cari lokasi atau nama gedung di China untuk mengisi koordinat secara otomatis.' 
+                  : '输入中国城市、地标或大楼名称，即可一键精准检索并自动填充经纬度。'}
               </p>
             </div>
           </div>
@@ -1096,7 +1105,7 @@ export default function AdminPanel({
                 setShowFormSearchResults(true);
               }}
               onFocus={() => setShowFormSearchResults(true)}
-              placeholder={lang === 'id' ? 'Cari lokasi / kota / provinsi di dunia...' : '例：山东省、安义县、雅加达(Jakarta)...'}
+              placeholder={lang === 'id' ? 'Cari lokasi / kota / provinsi di China (mis: Jiangxi, Yingtan)' : '可输入汉字或拼音精准搜索中国各省、市、区、地标或建筑物...'}
               className="w-full bg-white border border-slate-200 placeholder-slate-400 text-slate-800 rounded-xl pl-9 pr-8 py-2 text-xs font-semibold focus:outline-hidden focus:border-blue-500 focus:ring-1 focus:ring-blue-400 transition"
             />
             {isSearchingFormAddress ? (
@@ -1331,6 +1340,8 @@ export default function AdminPanel({
           <label className="font-extrabold text-[10px] uppercase text-slate-400 tracking-wider">
             {t.mediaStr}
           </label>
+
+
 
           {/* Drag and Drop Zone */}
           <div

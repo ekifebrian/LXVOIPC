@@ -27,6 +27,10 @@ service cloud.firestore {
       );
     }
 
+    function isBot() {
+      return isSignedIn() && request.auth.token.email == 'telegram-bot-service@lxvoip.com';
+    }
+
     function isValidId(id) {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
@@ -67,14 +71,18 @@ service cloud.firestore {
     // Admins Collection
     // Admins can see who the other admins are. Self-registration is allowed for the logged in user under their own UID.
     match /admins/{userId} {
-      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
-      allow list: if isAdmin();
+      allow read: if true;
       allow create: if isSignedIn() && isValidId(userId) && (
         (request.auth.uid == userId && isValidAdminDoc(incoming()) && (request.auth.token.email == null || incoming().email == request.auth.token.email)) ||
         (isAdmin() && isValidAdminDoc(incoming()))
       );
       allow update: if isAdmin() && isValidId(userId) && isValidAdminDoc(incoming()) && incoming().createdAt == existing().createdAt;
       allow delete: if isAdmin() && isValidId(userId) && userId != request.auth.uid; // prevent deleting yourself
+    }
+
+    // Telegram Sessions Collection
+    match /telegram_sessions/{chatId} {
+      allow read, write: if true;
     }
 
     // Categories Collection
@@ -97,12 +105,16 @@ service cloud.firestore {
     // Buildings Collection
     // Buildings are readable by admins, and by surveyors only if they created them
     match /buildings/{buildingId} {
-      allow read: if isAdmin() || (isSurveyor() && resource.data.createdBy == request.auth.uid);
-      allow create: if (isAdmin() || isSurveyor()) && isValidId(buildingId) && isValidBuilding(incoming()) && 
-                    incoming().createdBy == request.auth.uid &&
+      allow read: if true; // Allow reading buildings for map views and admin screens
+      allow create: if ((isAdmin() || isSurveyor() || isBot()) && isValidId(buildingId) && isValidBuilding(incoming()) && 
+                    (incoming().createdBy == request.auth.uid || isBot()) &&
                     incoming().createdAt == request.time &&
-                    incoming().updatedAt == request.time;
-      allow update: if (isAdmin() || (isSurveyor() && existing().createdBy == request.auth.uid)) && 
+                    incoming().updatedAt == request.time) || (
+                      request.auth == null && isValidId(buildingId) && isValidBuilding(incoming()) &&
+                      incoming().createdAt == request.time &&
+                      incoming().updatedAt == request.time
+                    );
+      allow update: if (isAdmin() || isBot() || (isSurveyor() && existing().createdBy == request.auth.uid) || request.auth == null) && 
                     isValidId(buildingId) && isValidBuilding(incoming()) &&
                     incoming().createdAt == existing().createdAt &&
                     incoming().updatedAt == request.time &&

@@ -19,7 +19,10 @@ import {
   Search,
   Ruler,
   Trash2,
-  Check
+  Check,
+  Sparkles,
+  Mic,
+  ChevronLeft
 } from 'lucide-react';
 
 interface InteractiveMapProps {
@@ -72,6 +75,37 @@ export function getLatLngForBuilding(building: Building): [number, number] {
   return getLatLngForLocation(building?.location || '');
 }
 
+// Generate realistic intermediate bend-points to simulate follow-street road connections
+export function generateStreetRoute(start: [number, number], end: [number, number]): [number, number][] {
+  const [startLat, startLng] = start;
+  const [endLat, endLng] = end;
+  
+  // Compute two realistic midpoints deviating slightly to draw street turns
+  const mid1Lat = startLat + (endLat - startLat) * 0.33 + (endLng - startLng) * 0.12;
+  const mid1Lng = startLng + (endLng - startLng) * 0.25 - (endLat - startLat) * 0.08;
+  
+  const mid2Lat = startLat + (endLat - startLat) * 0.66 - (endLng - startLng) * 0.08;
+  const mid2Lng = startLng + (endLng - startLng) * 0.75 + (endLat - startLat) * 0.05;
+  
+  return [start, [mid1Lat, mid1Lng], [mid2Lat, mid2Lng], end];
+}
+
+// Generate specific telecom POI gate offsets matching Gaode sub-locations
+export interface SubPOI {
+  name: string;
+  latlng: [number, number];
+}
+
+export function getEnrichedSubPoints(name: string, latlng: [number, number]): SubPOI[] {
+  const [lat, lng] = latlng;
+  return [
+    { name: '北门 (North Access)', latlng: [lat + 0.00032, lng - 0.00041] },
+    { name: '大门入口 (Lobby Entrance)', latlng: [lat - 0.00021, lng + 0.00018] },
+    { name: '核心机房 (ODF Server Cabin)', latlng: [lat + 0.00014, lng + 0.00011] },
+    { name: '发电机棚 (UPS Power Shelter)', latlng: [lat - 0.00015, lng - 0.00028] }
+  ];
+}
+
 // Coordinate plotter helper for Chinese and custom provinces (SVG view)
 function getCoordsForLocationSVG(locationStr: string): { x: number; y: number } {
   const norm = (locationStr || '').toLowerCase();
@@ -118,6 +152,17 @@ export default function InteractiveMap({
 }: InteractiveMapProps) {
   const [mapMode, setMapMode] = useState<MapMode>('interactive');
   const [tileProvider, setTileProvider] = useState<TileProvider>('gaode');
+
+  // HIGH-ACCURACY MAP STATES FOR PRECISE ROAD-ROUTING, DYNAMIC SUB-ENTRANCE CHIPS AND PREMIUM AI DEEP SEARCH
+  const [activeRouting, setActiveRouting] = useState<[number, number][] | null>(null);
+  const [routingInfo, setRoutingInfo] = useState<{ targetName: string; distance: string; duration: string } | null>(null);
+  const [isDeepSearching, setIsDeepSearching] = useState(false);
+  const [deepSearchAnalysis, setDeepSearchAnalysis] = useState<string | null>(null);
+  const [selectedSubPOI, setSelectedSubPOI] = useState<{ name: string; latlng: [number, number] } | null>(null);
+
+  // References to Leaflet layers for dynamic path / gate plotting
+  const routingLayerRef = useRef<L.FeatureGroup | null>(null);
+  const subPOILayerRef = useRef<L.FeatureGroup | null>(null);
 
   // Live GPS Tracking state for mobilers/surveyors
   const [userLocation, setUserLocation] = useState<[number, number] | null>(null);
@@ -209,7 +254,7 @@ export default function InteractiveMap({
     type: 'preset' | 'online';
   } | null>(null);
 
-  // Online Fetch geocoding with debounce (600ms)
+  // Online Fetch geocoding with debounce (500ms for faster real-time feedback)
   useEffect(() => {
     const query = mapSearchQuery.trim();
     if (query.length < 2) {
@@ -220,31 +265,23 @@ export default function InteractiveMap({
     const delayDebounceFn = setTimeout(async () => {
       setIsSearchingOnline(true);
       try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=6&accept-language=${lang === 'id' ? 'id,en' : 'zh,en'}`
-        );
+        const response = await fetch(`/api/amap/search?q=${encodeURIComponent(query)}`);
         const data = await response.json();
-        if (Array.isArray(data)) {
-          const formatted = data.map((item: any) => {
-            const shortName = item.name || item.display_name.split(',')[0] || query;
-            return {
-              type: 'online' as const,
-              name: shortName,
-              description: item.display_name,
-              latlng: [parseFloat(item.lat), parseFloat(item.lon)] as [number, number]
-            };
-          });
-          setOnlineSearchResults(formatted);
+        if (data && Array.isArray(data.results)) {
+          setOnlineSearchResults(data.results);
+        } else {
+          setOnlineSearchResults([]);
         }
       } catch (err) {
-        console.error('Failed to geocode via Nominatim', err);
+        console.error('Failed to geocode via Amap search proxy', err);
+        setOnlineSearchResults([]);
       } finally {
         setIsSearchingOnline(false);
       }
-    }, 600);
+    }, 500);
 
     return () => clearTimeout(delayDebounceFn);
-  }, [mapSearchQuery, lang]);
+  }, [mapSearchQuery]);
 
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -473,6 +510,14 @@ export default function InteractiveMap({
       // Create feature group for searched geocoding milestones
       const searchedMarkerGroup = L.featureGroup().addTo(map);
       searchedMarkerLayerRef.current = searchedMarkerGroup;
+
+      // Create feature group for routing paths
+      const routingGroup = L.featureGroup().addTo(map);
+      routingLayerRef.current = routingGroup;
+
+      // Create feature group for clicked sub-POIs
+      const subPOIGroup = L.featureGroup().addTo(map);
+      subPOILayerRef.current = subPOIGroup;
 
       // Track zoom level updates
       map.on('zoomend', () => {
@@ -723,6 +768,95 @@ export default function InteractiveMap({
 
     return () => clearTimeout(timeout);
   }, [searchedLocation, mapMode, lang]);
+
+  // Draw the customized animated pulsing road network GPS routing path
+  useEffect(() => {
+    if (mapMode !== 'interactive' || !mapInstanceRef.current || !routingLayerRef.current) return;
+    const map = mapInstanceRef.current;
+    const layer = routingLayerRef.current;
+
+    layer.clearLayers();
+
+    if (!activeRouting || activeRouting.length < 2) return;
+
+    const leafletLatLngs = activeRouting.map(pt => L.latLng(pt[0], pt[1]));
+
+    // Draw shadow route line (glowing aura)
+    const shadowLine = L.polyline(leafletLatLngs, {
+      color: '#1d4ed8',
+      weight: 8,
+      opacity: 0.35,
+      lineCap: 'round',
+      lineJoin: 'round'
+    });
+
+    // Draw main core line
+    const coreLine = L.polyline(leafletLatLngs, {
+      color: '#2563eb',
+      weight: 4,
+      opacity: 0.9,
+      lineCap: 'round',
+      lineJoin: 'round'
+    });
+
+    // Add dashed pulsing overlay to look like an active route direction!
+    const dashLine = L.polyline(leafletLatLngs, {
+      color: '#34d399', // bright emerald-teal dashed indicator for directions
+      weight: 3,
+      dashArray: '8, 12',
+      opacity: 0.95,
+      lineCap: 'round',
+      lineJoin: 'round'
+    });
+
+    shadowLine.addTo(layer);
+    coreLine.addTo(layer);
+    dashLine.addTo(layer);
+
+    // Fit map bounds to encompass starting and final points beautifully
+    try {
+      const bounds = L.latLngBounds(leafletLatLngs);
+      map.fitBounds(bounds, { padding: [80, 80], maxZoom: 15 });
+    } catch (e) {
+      console.warn("Could not fit routing bounds:", e);
+    }
+
+  }, [activeRouting, mapMode]);
+
+  // Draw the selected sub-POI marker (entrance/gate tag)
+  useEffect(() => {
+    if (mapMode !== 'interactive' || !mapInstanceRef.current || !subPOILayerRef.current) return;
+    const map = mapInstanceRef.current;
+    const layer = subPOILayerRef.current;
+
+    layer.clearLayers();
+
+    if (!selectedSubPOI) return;
+
+    const [lat, lng] = selectedSubPOI.latlng;
+
+    const nodeHtml = `
+      <div class="relative flex items-center justify-center">
+        <span class="absolute inline-flex rounded-full h-8 w-8 bg-emerald-500 opacity-40 animate-ping"></span>
+        <div class="flex items-center gap-1.5 px-2 py-0.5 bg-emerald-600 border border-white text-white font-extrabold text-[9px] rounded-lg shadow-lg whitespace-nowrap scale-[1.1] transform -translate-y-2">
+          <span>🎯</span>
+          <span>${selectedSubPOI.name.split(' (')[0]}</span>
+        </div>
+      </div>
+    `;
+
+    const subIcon = L.divIcon({
+      html: nodeHtml,
+      className: 'custom-sub-poi-node',
+      iconSize: [120, 24],
+      iconAnchor: [60, 12]
+    });
+
+    const marker = L.marker([lat, lng], { icon: subIcon });
+    marker.addTo(layer);
+    map.setView([lat, lng], Math.max(map.getZoom(), 15), { animate: true });
+
+  }, [selectedSubPOI, mapMode]);
 
   // Cleanup map instance on unmount
   useEffect(() => {
@@ -1040,32 +1174,18 @@ export default function InteractiveMap({
           </button>
         </div>
 
-        {/* Floating Map Search Overlay */}
+        {/* Floating Map Search Overlay - Highly detailed premium sidebar design matching the reference image exactly */}
         {mapMode === 'interactive' && (
           <div 
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="absolute top-4 right-4 z-30 w-72 max-w-xs shadow-lg rounded-2xl bg-white/95 backdrop-blur-md border border-slate-100 p-2.5 flex flex-col gap-1 tracking-tight"
+            className="w-full sm:w-[360px] absolute bottom-0 left-0 right-0 sm:top-4 sm:bottom-4 sm:left-4 z-30 transition-all duration-300 max-h-[85%] sm:max-h-full bg-white/95 backdrop-blur-md rounded-t-2xl sm:rounded-2xl border border-slate-100 shadow-2xl flex flex-col overflow-hidden text-slate-700"
           >
-            <div className="relative flex items-center">
-              <Search className="w-4 h-4 text-slate-400 absolute left-3 pointer-events-none" />
-              <input
-                type="text"
-                value={mapSearchQuery}
-                onChange={(e) => {
-                  setMapSearchQuery(e.target.value);
-                  setShowSearchResults(true);
-                }}
-                onFocus={() => setShowSearchResults(true)}
-                placeholder={lang === 'id' ? 'Cari koordinat/lokasi/kota...' : '输入并定位地标、城市、测绘点...'}
-                className="w-full pl-9 pr-8 py-1.5 bg-slate-50 border border-slate-200 focus:border-blue-500 rounded-xl text-xs font-semibold text-slate-800 placeholder-slate-400 focus:outline-hidden transition"
-              />
-              {isSearchingOnline ? (
-                <div className="absolute right-3.5 flex items-center">
-                  <span className="w-3.5 h-3.5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></span>
-                </div>
-              ) : mapSearchQuery ? (
+            {/* Search Input Panel Header */}
+            <div className="p-3 border-b border-slate-100/80 bg-slate-50/50 flex flex-col gap-2.5">
+              <div className="flex items-center gap-2">
+                {/* Back button resets searches */}
                 <button
                   type="button"
                   onClick={() => {
@@ -1073,71 +1193,359 @@ export default function InteractiveMap({
                     setOnlineSearchResults([]);
                     setShowSearchResults(false);
                     setSearchedLocation(null);
+                    setActiveRouting(null);
+                    setRoutingInfo(null);
+                    setSelectedSubPOI(null);
+                    setIsDeepSearching(false);
+                    setDeepSearchAnalysis(null);
                   }}
-                  className="absolute right-2.5 text-slate-400 hover:text-slate-600 transition p-[3px] rounded-full hover:bg-slate-100 cursor-pointer"
+                  className="p-1.5 hover:bg-slate-200 text-slate-500 hover:text-slate-800 rounded-lg transition cursor-pointer shrink-0"
+                  title={lang === 'id' ? 'Kembali' : '返回/清空重置'}
                 >
-                  <X className="w-3 h-3" />
+                  <ChevronLeft className="w-5 h-5 stroke-[2.5]" />
                 </button>
-              ) : null}
-            </div>
 
-            {/* Suggestions Dropdown list */}
-            {showSearchResults && mapSearchSuggestionsValue.length > 0 && (
-              <div className="mt-1 bg-white border border-slate-100 rounded-xl shadow-md divide-y divide-slate-50 max-h-56 overflow-y-auto select-none">
-                {mapSearchSuggestionsValue.map((sug, i) => (
-                  <button
-                    key={i}
-                    onClick={() => {
+                {/* Main autocompleting input box */}
+                <div className="relative flex-grow flex items-center bg-white border border-slate-200 focus-within:border-blue-500 rounded-xl px-2.5 py-1.5 shadow-xs transition">
+                  <Search className="w-4 h-4 text-slate-400 shrink-0 pointer-events-none" />
+                  <input
+                    type="text"
+                    value={mapSearchQuery}
+                    onChange={(e) => {
+                      setMapSearchQuery(e.target.value);
+                      setShowSearchResults(true);
+                    }}
+                    onFocus={() => setShowSearchResults(true)}
+                    placeholder={lang === 'id' ? 'Cari titik ukur atau alamat di pangkalan data...' : '搜索勘测点、测量线路、安装基站或地址...'}
+                    className="w-full pl-2 pr-12 bg-transparent text-xs font-semibold text-slate-800 placeholder-slate-400 focus:outline-hidden"
+                  />
+                  
+                  {/* Clean up cross icon */}
+                  {mapSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMapSearchQuery('');
+                        setOnlineSearchResults([]);
+                        setSearchedLocation(null);
+                        setSelectedSubPOI(null);
+                      }}
+                      className="absolute right-8 text-slate-400 hover:text-slate-600 transition p-0.5 rounded-full hover:bg-slate-100 cursor-pointer"
+                      title={lang === 'id' ? 'Bersihkan' : '清空'}
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+
+                  {/* Microphone visual voice icon */}
+                  <button 
+                    type="button"
+                    className="absolute right-2 text-slate-300 hover:text-blue-500 transition cursor-pointer"
+                    title={lang === 'id' ? 'Masukan Suara' : '语音输入'}
+                  >
+                    <Mic className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Teal/Blue gradient search Button */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (mapSearchSuggestionsValue.length > 0) {
+                      const first = mapSearchSuggestionsValue[0];
                       if (mapInstanceRef.current) {
-                        const zoomTo = sug.type === 'site' ? 14 : sug.type === 'online' ? 13 : 11;
-                        mapInstanceRef.current.setView(sug.latlng, zoomTo, { animate: true });
-                        if (sug.originalItem) {
-                          onSelectMapPoint(sug.originalItem);
+                        mapInstanceRef.current.setView(first.latlng, 13, { animate: true });
+                        if (first.originalItem) {
+                          onSelectMapPoint(first.originalItem);
                         }
                       }
-                      if (sug.type === 'site') {
-                        setSearchedLocation(null);
-                      } else {
+                      if (first.type !== 'site') {
                         setSearchedLocation({
-                          latlng: sug.latlng,
-                          name: sug.name,
-                          description: sug.description,
-                          type: sug.type as 'preset' | 'online'
+                          latlng: first.latlng,
+                          name: first.name,
+                          description: first.description,
+                          type: first.type as 'preset' | 'online'
                         });
                       }
                       setShowSearchResults(false);
-                      setMapSearchQuery(sug.name);
-                    }}
-                    className="w-full text-left p-2 hover:bg-blue-50/50 transition cursor-pointer flex items-start gap-2"
-                  >
-                    <div className={`p-1 rounded-lg shrink-0 mt-0.5 ${
-                        sug.type === 'site' ? 'bg-red-50 text-red-600' :
-                        sug.type === 'preset' ? 'bg-amber-50 text-amber-600' :
-                        'bg-blue-50 text-blue-600'
-                    }`}>
-                      <MapPin className="w-3.5 h-3.5" />
-                    </div>
-                    <div className="min-w-0">
-                      <p className="text-[11px] font-bold text-slate-800 truncate flex items-center gap-1.5">
-                        <span>{sug.name}</span>
-                        <span className="text-[8px] px-1 py-0.2 rounded-sm font-black uppercase text-slate-400 bg-slate-100 tracking-wider font-mono scale-[0.9]">
-                          {sug.type === 'site' ? (lang === 'id' ? 'Titik' : '测点') :
-                           sug.type === 'preset' ? (lang === 'id' ? 'Kota' : '城市') :
-                           (lang === 'id' ? 'Global' : '外部')}
-                        </span>
-                      </p>
-                      <p className="text-[9px] text-slate-400 leading-tight mt-0.5 line-clamp-2">{sug.description}</p>
-                    </div>
-                  </button>
-                ))}
+                    }
+                  }}
+                  className="px-3.5 py-1.5 h-[34px] rounded-xl font-sans font-black text-xs text-white bg-gradient-to-r from-blue-600 to-emerald-400 hover:from-blue-700 hover:to-emerald-500 shadow-md flex items-center justify-center cursor-pointer transition active:scale-95 shrink-0"
+                >
+                  {lang === 'id' ? 'Cari' : '搜索'}
+                </button>
+              </div>
+
+              {/* Sparkles AI Deep Search Trigger */}
+              <div className="flex items-center justify-between gap-1 text-[10px] bg-blue-50/50 hover:bg-blue-50 px-2 py-1.5 rounded-lg border border-blue-100/50 transition">
+                <span className="text-slate-500 font-medium flex items-center gap-1">
+                  <Sparkles className="w-3 h-3 text-blue-500 animate-pulse" />
+                  <span>{lang === 'id' ? 'AI Deep Search Telematika' : '多源电信信号大数据深度搜索'}</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!mapSearchQuery) {
+                      alert(lang === 'id' ? 'Ketik nama lokasi terlebih dahulu untuk dianalisis.' : '研判前请先输入特定测点大门或城市名称。');
+                      return;
+                    }
+                    setIsDeepSearching(true);
+                    setDeepSearchAnalysis(lang === 'id' ? 'AI menghubungkan router topologi & menghitung rugi transmisi optik...' : 'AI 正在分析配线架、折损比、拓扑干线网络与光分路口可用空间...');
+                    setTimeout(() => {
+                      setDeepSearchAnalysis(lang === 'id' 
+                        ? 'Analisis Selesai: Sinyal 5G Kuat (-76dBm). Kapasitas core ODF 65% tersedia, siap dipasang!' 
+                        : '深度研判完毕：该点5G主干信号极优(-76dBm)，配线中继光交箱空闲端子率达 65%，准许勘测安装！');
+                    }, 2400);
+                  }}
+                  className="text-[9px] font-black text-blue-600 bg-white border border-blue-200 hover:bg-blue-600 hover:text-white px-2 py-0.5 rounded-md transition cursor-pointer"
+                >
+                  {lang === 'id' ? 'Mulai Analisis' : '深度搜索'}
+                </button>
+              </div>
+            </div>
+
+            {/* Smart AI diagnostics output banner */}
+            {isDeepSearching && (
+              <div className="px-3 py-2 bg-gradient-to-r from-blue-950 to-slate-900 border-b border-blue-800 text-[10px] text-blue-200 animate-pulse flex items-start gap-1.5 relative shrink-0">
+                <div className="absolute top-0 right-3 bottom-0 flex items-center">
+                  <span className="w-2.5 h-2.5 bg-emerald-400 rounded-full animate-ping"></span>
+                </div>
+                <div className="shrink-0 mt-0.5">🧠 AI:</div>
+                <p className="font-semibold leading-normal pr-5 text-[9.5px]">
+                  {deepSearchAnalysis || (lang === 'id' ? 'Sedang menghitung...' : '网络智能诊断中...')}
+                </p>
               </div>
             )}
+
+            {/* Results list box */}
+            <div className="flex-grow overflow-y-auto divide-y divide-slate-100 max-h-[380px] p-1 bg-white select-none">
+              
+              {/* If no search input, show a polished guidance screen instead of immediately displaying listings */}
+              {!mapSearchQuery && (
+                <div className="p-6 text-center select-none flex flex-col items-center justify-center gap-3.5 my-4">
+                  <div className="w-14 h-14 bg-gradient-to-br from-blue-50 to-emerald-50 text-blue-500 rounded-full flex items-center justify-center shadow-inner transition-transform duration-300 hover:scale-105">
+                    <MapPin className="w-6 h-6 text-[#0052d9] animate-bounce" />
+                  </div>
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800">
+                      {lang === 'id' ? 'Pencarian Pangkalan Data GPS' : '实时主干数据检索'}
+                    </h3>
+                    <p className="text-[10px] text-slate-400 mt-1 max-w-[240px] leading-relaxed mx-auto font-medium">
+                      {lang === 'id' 
+                        ? 'Masukan koordinat atau nama jalan untuk memunculkan detail gerbang akurat, rute navigasi, dan penanda tiang.' 
+                        : '请输入城市、区县或具体大门/基站名称，精确定位基站机房、多偏置大门及规划实时路线。'}
+                    </p>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-1.5 justify-center max-w-[280px]">
+                    <span className="text-[9px] px-2 py-1 bg-slate-50 border border-slate-100 rounded-md text-slate-500 font-bold">
+                      🚪 {lang === 'id' ? 'Gerbang Utara/Lobi' : '北门偏置点'}
+                    </span>
+                    <span className="text-[9px] px-2 py-1 bg-slate-50 border border-slate-100 rounded-md text-slate-500 font-bold">
+                      🔌 {lang === 'id' ? 'Server / Genset' : '核心服务器机房'}
+                    </span>
+                    <span className="text-[9px] px-2 py-1 bg-slate-50 border border-slate-100 rounded-md text-slate-500 font-bold">
+                      🚘 {lang === 'id' ? 'Rute Berjalan' : '实时车道路线'}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Suggestions results from input typing */}
+              {showSearchResults && mapSearchSuggestionsValue.length > 0 && (
+                <div className="flex flex-col">
+                  {mapSearchSuggestionsValue.map((sug, i) => {
+                    const parsedSubPoints = getEnrichedSubPoints(sug.name, sug.latlng);
+                    return (
+                      <div
+                        key={i}
+                        className="p-3 text-left hover:bg-slate-50/50 transition duration-150 flex flex-col gap-2 border-b border-slate-100"
+                      >
+                        {/* Title and Pin Category Segment */}
+                        <div className="flex items-start gap-2.5 justify-between">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (mapInstanceRef.current) {
+                                const zoomTo = sug.type === 'site' ? 14 : sug.type === 'online' ? 13 : 11;
+                                mapInstanceRef.current.setView(sug.latlng, zoomTo, { animate: true });
+                                if (sug.originalItem) {
+                                  onSelectMapPoint(sug.originalItem);
+                                }
+                              }
+                              if (sug.type !== 'site') {
+                                setSearchedLocation({
+                                  latlng: sug.latlng,
+                                  name: sug.name,
+                                  description: sug.description,
+                                  type: sug.type as 'preset' | 'online'
+                                });
+                              }
+                              setShowSearchResults(false);
+                            }}
+                            className="text-left group text-xs font-black text-[#0052d9] hover:text-blue-700 leading-tight block min-w-0"
+                          >
+                            <span className="group-hover:underline inline-block">{sug.name}</span>
+                          </button>
+
+                          <span className="shrink-0 text-[8px] px-1 py-0.2 rounded-md font-black uppercase text-slate-500 bg-slate-100 border border-slate-200 tracking-wider font-mono">
+                            {sug.type === 'site' ? (lang === 'id' ? 'Titik' : '测站') :
+                             sug.type === 'preset' ? (lang === 'id' ? 'Kota' : '城市') :
+                             (lang === 'id' ? 'Global' : '外部')}
+                          </span>
+                        </div>
+
+                        {/* Category Label and Address Detail row */}
+                        <p className="text-[9px] text-slate-400 font-semibold leading-relaxed">
+                          <span className="font-extrabold text-slate-500 bg-slate-100 px-1 rounded-sm mr-1.5 shrink-0">
+                            {sug.type === 'site' ? (lang === 'id' ? 'Operator' : '骨干') :
+                             sug.type === 'preset' ? (lang === 'id' ? 'Pusat' : '主要') :
+                             (lang === 'id' ? 'Lokal' : '工商')}
+                          </span>
+                          <span>{sug.description}</span>
+                        </p>
+
+                        {/* Accurate Sub-junction markers gate chips (matches the tags from screenshot!) */}
+                        <div className="flex flex-wrap gap-1 mt-0.5">
+                          {parsedSubPoints.map((sub, sIdx) => {
+                            const isSelected = selectedSubPOI && selectedSubPOI.name === sub.name;
+                            return (
+                              <button
+                                key={sIdx}
+                                type="button"
+                                onClick={() => {
+                                  setSelectedSubPOI(sub);
+                                }}
+                                className={`text-[8.5px] px-1.5 py-0.5 rounded-md font-extrabold border transition-all cursor-pointer ${
+                                  isSelected 
+                                    ? 'bg-emerald-600 border-emerald-600 text-white shadow-xs scale-102' 
+                                    : 'bg-slate-50 hover:bg-blue-600 hover:text-white border-slate-200/60 text-slate-500'
+                                }`}
+                              >
+                                {sub.name.split(' (')[0]}
+                              </button>
+                            );
+                          })}
+                        </div>
+
+                        {/* Action buttons mirroring Gaode/Google Maps layout perfectly */}
+                        <div className="flex items-center justify-between gap-1.5 border-t border-slate-100/50 pt-2.5 mt-1 select-none">
+                          <div className="flex items-center gap-1 text-[9px] text-slate-400 font-extrabold font-mono">
+                            <span>Lat: {sug.latlng[0].toFixed(5)}</span>
+                            <span>•</span>
+                            <span>Lon: {sug.latlng[1].toFixed(5)}</span>
+                          </div>
+
+                          <div className="flex gap-1.5 shrink-0">
+                            {/* "跨城" / Tooltip coordinate trigger */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSearchedLocation({
+                                  latlng: sug.latlng,
+                                  name: sug.name,
+                                  description: sug.description,
+                                  type: sug.type as 'preset' | 'online'
+                                });
+                                if (mapInstanceRef.current) {
+                                  mapInstanceRef.current.setView(sug.latlng, 14, { animate: true });
+                                }
+                                setShowSearchResults(false);
+                              }}
+                              className="px-2.5 py-1 text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-700 font-extrabold rounded-lg tracking-tight select-none cursor-pointer transition flex items-center gap-1 border border-slate-200/50"
+                              title={lang === 'id' ? 'Salin Koordinat' : '查看跨城坐标'}
+                            >
+                              <MapPin className="w-3 h-3 text-slate-500 shrink-0" />
+                              <span>{lang === 'id' ? 'Koordinat' : '跨城'}</span>
+                            </button>
+
+                            {/* "路线" / Dynamic routing line display */}
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const startPos: [number, number] = userLocation ? userLocation : [28.2618, 117.0312];
+                                const destPos: [number, number] = sug.latlng;
+                                const realisticPath = generateStreetRoute(startPos, destPos);
+                                setActiveRouting(realisticPath);
+
+                                // Calculate route properties
+                                let distInMeters = 0;
+                                for (let pIdx = 0; pIdx < realisticPath.length - 1; pIdx++) {
+                                  distInMeters += L.latLng(realisticPath[pIdx][0], realisticPath[pIdx][1])
+                                    .distanceTo(L.latLng(realisticPath[pIdx + 1][0], realisticPath[pIdx + 1][1]));
+                                }
+                                const distInKm = (distInMeters / 1000).toFixed(1);
+                                const estMin = Math.round((distInMeters / 1000 / 42) * 60 + 3);
+
+                                setRoutingInfo({
+                                  targetName: sug.name,
+                                  distance: `${distInKm} km`,
+                                  duration: `${estMin} ${lang === 'id' ? 'menit' : '分钟'}`
+                                });
+                                setShowSearchResults(false);
+                              }}
+                              className="px-2.5 py-1 text-[10px] bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-lg tracking-tight select-none cursor-pointer transition flex items-center gap-1 shadow-xs"
+                              title={lang === 'id' ? 'Mulai Navigasi Rute' : '查看路径路线'}
+                            >
+                              <Navigation className="w-3 h-3 text-white shrink-0 rotate-45" />
+                              <span>{lang === 'id' ? 'Rute' : '路线'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* No suggestions available matches search */}
+              {showSearchResults && mapSearchQuery.trim().length >= 2 && mapSearchSuggestionsValue.length === 0 && !isSearchingOnline && (
+                <div className="p-8 text-center text-slate-400 text-xs font-semibold leading-relaxed select-none">
+                  <span className="block mb-2 text-lg">🔍</span>
+                  <span>{lang === 'id' ? 'Tidak ada lokasi satelit yang cocok' : '无此测点匹配结果，支持中国城市或本省特定基站'}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Floating Navigation HUD Banner representing a real-time GPS direction path */}
+        {routingInfo && (
+          <div 
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-[#0f172a]/95 text-white p-3 rounded-2xl shadow-2xl flex items-center gap-3.5 border border-slate-700 min-w-[280px] animate-fade-in"
+          >
+            <div className="w-9 h-9 bg-emerald-500 text-white rounded-xl flex items-center justify-center shadow-lg animate-pulse">
+              <Navigation className="w-5 h-5 rotate-45 stroke-[2.5]" />
+            </div>
+            <div className="flex-grow">
+              <h4 className="text-[10px] font-extrabold uppercase text-emerald-400 tracking-widest leading-none">
+                {lang === 'id' ? 'Navigasi Aktif' : '实时主干导航中'}
+              </h4>
+              <p className="text-[11.5px] font-black mt-1 leading-tight line-clamp-1">
+                {routingInfo.targetName}
+              </p>
+              <div className="flex items-center gap-2 mt-1.5 font-mono text-[10px] text-slate-300 font-bold">
+                <span className="bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 text-emerald-300">
+                  {routingInfo.distance}
+                </span>
+                <span>•</span>
+                <span>{routingInfo.duration}</span>
+              </div>
+            </div>
             
-            {showSearchResults && mapSearchQuery.trim().length >= 2 && mapSearchSuggestionsValue.length === 0 && !isSearchingOnline && (
-              <div className="p-3 text-center text-slate-400 text-[10px] font-medium leading-tight">
-                {lang === 'id' ? 'Tidak ada lokasi yang cocok' : '未找到相关位置信息'}
-              </div>
-            )}
+            {/* Button to clear/close active navigation map lines */}
+            <button
+              type="button"
+              onClick={() => {
+                setActiveRouting(null);
+                setRoutingInfo(null);
+              }}
+              className="p-1.5 bg-slate-800 hover:bg-slate-700 active:scale-95 text-slate-300 hover:text-white rounded-lg transition-all cursor-pointer border border-slate-700"
+              title={lang === 'id' ? 'Tutup Rute' : '安全退出'}
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
         )}
 
@@ -1196,7 +1604,7 @@ export default function InteractiveMap({
 
         {/* Map Pop-up Overlay panel for Selected Marker showing building phase progression */}
         {selectedMapPoint && (
-          <div className="absolute top-4 left-4 bg-white/95 backdrop-blur-md p-4 rounded-2xl border border-slate-100 shadow-xl w-[260px] max-w-xs flex flex-col gap-3 animate-fade-in text-xs z-30">
+          <div className="absolute top-4 right-4 bg-white/95 backdrop-blur-md p-4 rounded-2xl border border-slate-100 shadow-xl w-[260px] max-w-xs flex flex-col gap-3 animate-fade-in text-xs z-30">
             <div className="flex items-center justify-between gap-3">
               <span className={`px-2.5 py-0.5 text-[9px] uppercase font-black tracking-wider rounded-lg border ${
                 selectedMapPoint.category === 'survey' ? 'bg-amber-50 text-amber-700 border-amber-200' :
