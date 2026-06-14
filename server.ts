@@ -1,3 +1,5 @@
+process.env.GOOGLE_CLOUD_FIRESTORE_TELEMETRY_DISABLED = "true";
+
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
@@ -117,6 +119,14 @@ app.post("/api/manual-webhook-setup", async (req, res) => {
   try {
     const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
     const data = await response.json() as any;
+    
+    if (data && data.ok === false) {
+      return res.status(400).json({ 
+        ok: false, 
+        error: `Telegram API: ${data.description || "Unauthorized/Invalid Bot Token"} (Error Code: ${data.error_code || 401})` 
+      });
+    }
+
     return res.json({ ok: true, data });
   } catch (err: any) {
     console.error("[Manual Setup] Failed to register webhook via API call:", err);
@@ -367,12 +377,12 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
 
     try {
       // Look up in surveyors
-      const snapSurveyorEmail = await getDocs(query(collection(db, "surveyors"), where("email", "==", input)));
+      const snapSurveyorEmail = await adminDb.collection("surveyors").where("email", "==", input).get();
       if (!snapSurveyorEmail.empty) {
         matchedSurveyor = snapSurveyorEmail.docs[0].data();
         matchedSurveyorId = snapSurveyorEmail.docs[0].id;
       } else {
-        const snapSurveyorPhone = await getDocs(query(collection(db, "surveyors"), where("phone", "==", input)));
+        const snapSurveyorPhone = await adminDb.collection("surveyors").where("phone", "==", input).get();
         if (!snapSurveyorPhone.empty) {
           matchedSurveyor = snapSurveyorPhone.docs[0].data();
           matchedSurveyorId = snapSurveyorPhone.docs[0].id;
@@ -381,7 +391,7 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
 
       // If not found, look up in admins
       if (!matchedSurveyor) {
-        const snapAdminEmail = await getDocs(query(collection(db, "admins"), where("email", "==", input)));
+        const snapAdminEmail = await adminDb.collection("admins").where("email", "==", input).get();
         if (!snapAdminEmail.empty) {
           matchedSurveyor = snapAdminEmail.docs[0].data();
           matchedSurveyorId = snapAdminEmail.docs[0].id;
