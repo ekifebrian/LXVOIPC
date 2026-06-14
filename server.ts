@@ -375,6 +375,145 @@ async function getTelegramSession(chatId: string | number): Promise<any> {
   return null;
 }
 
+// Media item details for media groups
+interface PendingMediaItem {
+  fileId: string;
+  fileName: string;
+  mimeType: string;
+  isPhoto: boolean;
+}
+
+interface PendingMediaGroup {
+  chatId: string | number;
+  username: string;
+  captions: string[];
+  texts: string[];
+  mediaList: PendingMediaItem[];
+  timer: NodeJS.Timeout | null;
+  receivedAt: number;
+}
+
+const pendingMediaGroups: Record<string, PendingMediaGroup> = {};
+
+// Helper to download a file from Telegram and upload it to Firebase Storage (with local fallback)
+async function uploadSingleTelegramFile(fileId: string, fileName: string, mimeType: string, token: string): Promise<string> {
+  const targetFilePath = await getTelegramFilePath(fileId, token);
+  if (!targetFilePath) {
+    throw new Error("Gagal mengambil path berkas dari server Telegram.");
+  }
+
+  const fileBuffer = await downloadTelegramFile(targetFilePath, token);
+  if (!fileBuffer || fileBuffer.length === 0) {
+    throw new Error("Gagal memproses data unduhan media.");
+  }
+
+  let mediaUrl = "";
+  try {
+    // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
+    await getClientAuth();
+
+    // Store in Firebase Storage using the Client SDK
+    const userUid = auth.currentUser?.uid || "telegram";
+    const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
+    const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
+    mediaUrl = await getDownloadURL(uploadBytesResult.ref);
+    console.log("[Media Upload Helper] Uploaded successfully to Firebase Storage:", mediaUrl);
+  } catch (storageErr: any) {
+    console.warn("[Media Upload Helper] Firebase Storage upload failed/unauthorized, falling back to local server storage:", storageErr.message || storageErr);
+    
+    // Save file locally on the container as robust fallback
+    const localPath = path.join(process.cwd(), "uploads", fileName);
+    fs.writeFileSync(localPath, Buffer.from(fileBuffer));
+    
+    const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+    mediaUrl = appUrl ? `${appUrl}/uploads/${fileName}` : `/uploads/${fileName}`;
+    console.log("[Media Upload Helper] Stored and accessible locally:", mediaUrl);
+  }
+
+  return mediaUrl;
+}
+
+// Processor for group/album messages sent as a media group
+async function processMediaGroup(group: PendingMediaGroup, token: string) {
+  const chatId = group.chatId;
+  const username = group.username;
+
+  try {
+    await sendTelegramMessage(chatId, `🤖 *Berhasil mengumpulkan ${group.mediaList.length} media dari album. Mengunggah berkas ke cloud...*`, token);
+
+    // Upload all files in parallel
+    const uploadPromises = group.mediaList.map(async (media) => {
+      try {
+        const url = await uploadSingleTelegramFile(media.fileId, media.fileName, media.mimeType, token);
+        return url;
+      } catch (err: any) {
+        console.warn(`[Process Media Group] Failed to upload a file: ${media.fileName}. Error:`, err.message || err);
+        return null;
+      }
+    });
+
+    const results = await Promise.all(uploadPromises);
+    const mediaUrls = results.filter((url): url is string => url !== null);
+
+    if (mediaUrls.length === 0) {
+      await sendTelegramMessage(chatId, `❌ Gagal mengunggah satupun berkas media dari album Anda.`, token);
+      return;
+    }
+
+    await sendTelegramMessage(chatId, `🤖 *Mengunduh & memproses media selesai. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
+
+    // Verify Surveyor session identity
+    const dbSession = await getTelegramSession(chatId);
+    const activeSession = dbSession || {
+      name: username,
+      email: "",
+      phone: "",
+      role: "unverified_telegram",
+      userUid: "telegram_" + chatId
+    };
+
+    // Combine all unique captions & text
+    const uniqueCaptions = Array.from(new Set(group.captions.map(c => c.trim()).filter(Boolean)));
+    const uniqueTexts = Array.from(new Set(group.texts.map(t => t.trim()).filter(Boolean)));
+    const combinedCaption = uniqueCaptions.join("\n") || uniqueTexts.join("\n") || `Site baru oleh ${activeSession.name}`;
+
+    const parsedRecord = await extractStructuredRecordWithGemini(combinedCaption, activeSession.name);
+
+    // Set the complete group's gallery list
+    parsedRecord.gallery = mediaUrls;
+
+    // Save record in Firestore
+    const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const buildingRef = doc(db, "buildings", finalRecordId);
+    await setDoc(buildingRef, {
+      ...parsedRecord,
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
+      createdBy: activeSession.userUid || "telegram_" + chatId
+    });
+
+    const portalUrl = process.env.APP_URL || "https://ai.studio/build";
+
+    const confirmationMsg = `✅ *DATA LAPANGAN ALBUM BERHASIL DISINKRONKAN!*
+----------------------------------------
+📌 *Nama:* ${parsedRecord.name}
+📂 *Kategori:* ${parsedRecord.category.toUpperCase()}
+👤 *Operator:* ${parsedRecord.operator}
+📍 *Posisi:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
+🗺️ *Wilayah:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
+📝 *Deskripsi:* ${parsedRecord.description}
+🖼️ *Jumlah Media:* ${mediaUrls.length} berkas berhasil disimpan di galeri!
+
+🔗 *Buka platform utama untuk melihat langsung:*
+👉 ${portalUrl}`;
+
+    await sendTelegramMessage(chatId, confirmationMsg, token);
+  } catch (err: any) {
+    console.error("Failed to process Telegram media group upload:", err);
+    await sendTelegramMessage(chatId, `⚠️ Gagal sinkronisasi data lapangan grup: ${err.message || err}. Harap coba kembali.`, token);
+  }
+}
+
 // Telegram message processor core (Active)
 async function handleTelegramUpdate(update: any, token: string) {
   const message = update.message || update.edited_message;
@@ -504,6 +643,65 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
   // 3. Media Message upload flow
   const isPhoto = message.photo && message.photo.length > 0;
   const isVideo = message.video;
+  const mediaGroupId = message.media_group_id;
+
+  if (mediaGroupId && (isPhoto || isVideo)) {
+    // If it belongs to a media group/album, buffer it first
+    if (!pendingMediaGroups[mediaGroupId]) {
+      pendingMediaGroups[mediaGroupId] = {
+        chatId,
+        username,
+        captions: [],
+        texts: [],
+        mediaList: [],
+        timer: null,
+        receivedAt: Date.now()
+      };
+      
+      // Notify only once per group
+      await sendTelegramMessage(chatId, `⚡️ *Grup media diterima! Sedang mengumpulkan semua foto & video dari album...*`, token);
+    }
+
+    const groupRef = pendingMediaGroups[mediaGroupId];
+
+    // Append media item
+    if (isPhoto) {
+      const photoObj = message.photo[message.photo.length - 1];
+      const fileId = photoObj.file_id;
+      const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.jpg`;
+      const mimeType = "image/jpeg";
+      groupRef.mediaList.push({ fileId, fileName, mimeType, isPhoto: true });
+    } else if (isVideo) {
+      const fileId = isVideo.file_id;
+      const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 6)}_${isVideo.file_name || "video.mp4"}`;
+      const mimeType = isVideo.mime_type || "video/mp4";
+      groupRef.mediaList.push({ fileId, fileName, mimeType, isPhoto: false });
+    }
+
+    if (caption) {
+      groupRef.captions.push(caption);
+    }
+    if (text) {
+      groupRef.texts.push(text);
+    }
+
+    // Reset debounce timer
+    if (groupRef.timer) {
+      clearTimeout(groupRef.timer);
+    }
+
+    groupRef.timer = setTimeout(() => {
+      const liveGroup = pendingMediaGroups[mediaGroupId];
+      if (liveGroup) {
+        delete pendingMediaGroups[mediaGroupId];
+        processMediaGroup(liveGroup, token).catch(e => {
+          console.error("Error in processMediaGroup promise:", e);
+        });
+      }
+    }, 2000);
+
+    return;
+  }
 
   if (isPhoto || isVideo) {
     // Acknowledge receipt
@@ -526,41 +724,8 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         mimeType = isVideo.mime_type || "video/mp4";
       }
 
-      // Download from Telegram
-      const targetFilePath = await getTelegramFilePath(fileId, token);
-      if (!targetFilePath) {
-        await sendTelegramMessage(chatId, `❌ Gagal mengambil path berkas dari server Telegram.`, token);
-        return;
-      }
-
-      const fileBuffer = await downloadTelegramFile(targetFilePath, token);
-      if (!fileBuffer || fileBuffer.length === 0) {
-        await sendTelegramMessage(chatId, `❌ Gagal memproses data unduhan media.`, token);
-        return;
-      }
-
-      let mediaUrl = "";
-      try {
-        // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
-        await getClientAuth();
-
-        // Store in Firebase Storage using the Client SDK
-        const userUid = auth.currentUser?.uid || "telegram";
-        const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
-        const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
-        mediaUrl = await getDownloadURL(uploadBytesResult.ref);
-        console.log("[Media Upload] Uploaded successfully to Firebase Storage:", mediaUrl);
-      } catch (storageErr: any) {
-        console.warn("[Media Upload] Firebase Storage upload failed/unauthorized, falling back to local server storage:", storageErr.message || storageErr);
-        
-        // Save file locally on the container as robust fallback
-        const localPath = path.join(process.cwd(), "uploads", fileName);
-        fs.writeFileSync(localPath, Buffer.from(fileBuffer));
-        
-        const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
-        mediaUrl = appUrl ? `${appUrl}/uploads/${fileName}` : `/uploads/${fileName}`;
-        console.log("[Media Upload] Stored and accessible locally:", mediaUrl);
-      }
+      // Upload file cleanly using helper
+      const mediaUrl = await uploadSingleTelegramFile(fileId, fileName, mimeType, token);
 
       await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
 
