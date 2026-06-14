@@ -121,5 +121,11 @@ service cloud.firestore {
                     incoming().createdBy == existing().createdBy;
       allow delete: if isAdmin() || (isSurveyor() && existing().createdBy == request.auth.uid);
     }
+
+    // Settings Collection (such as Telegram bot state)
+    match /settings/{settingId} {
+      allow read: if true;
+      allow write: if isAdmin() || isBot();
+    }
   }
 }

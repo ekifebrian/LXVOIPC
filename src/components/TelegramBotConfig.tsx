@@ -12,12 +12,14 @@ interface BotInfo {
   botFirstName?: string;
   instructionsUrl: string;
   message: string;
+  enabled?: boolean;
 }
 
 export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
   const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [copiedText, setCopiedText] = useState<string | null>(null);
+  const [isToggling, setIsToggling] = useState(false);
 
   // VPS Webhook manual registration fields
   const [customUrl, setCustomUrl] = useState('https://lxvoip.kirim-cepat.xyz');
@@ -38,6 +40,32 @@ export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
     }
   };
 
+  const toggleBotState = async (nextState: boolean) => {
+    setIsToggling(true);
+    setWebhookError(null);
+    setWebhookResult(null);
+    try {
+      const res = await fetch('/api/telegram-toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextState })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setBotInfo(prev => prev ? { ...prev, enabled: data.enabled } : null);
+        if (data.telegramResult) {
+          setWebhookResult(data.telegramResult);
+        }
+      } else {
+        setWebhookError(data.error || 'Gagal merubah status bot.');
+      }
+    } catch (err: any) {
+      setWebhookError(err.message || 'Gagal mengirimkan perintah ke server.');
+    } finally {
+      setIsToggling(false);
+    }
+  };
+
   useEffect(() => {
     fetchBotInfo();
   }, []);
@@ -54,7 +82,17 @@ export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ customUrl })
       });
-      const data = await res.json();
+      
+      const resText = await res.text();
+      let data: any = {};
+      try {
+        data = resText ? JSON.parse(resText) : {};
+      } catch (parseErr) {
+        throw new Error(isIndo
+          ? `Server VPS mengembalikan respon non-JSON (Status ${res.status}). Silakan periksa apakah backend Anda berjalan dengan baik di VPS.`
+          : `VPS Server implementation returned non-JSON response (Status ${res.status}). Please check if your backend application is running properly.`);
+      }
+
       if (!res.ok) {
         setWebhookError(data.error || 'Failed to register webhook. Make sure Bot Token is configured.');
       } else {
@@ -117,36 +155,71 @@ export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
         </button>
       </div>
 
-      {/* BOT STATUS BANNER */}
+      {/* BOT STATUS BANNER WITH ON/OFF TOGGLE SWITCH */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <div className={`md:col-span-2 p-5 rounded-2xl border flex items-center gap-4 transition duration-200 ${
-          botInfo?.active 
+        <div className={`md:col-span-2 p-5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition duration-200 ${
+          botInfo?.active && botInfo?.enabled !== false
             ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800' 
             : 'bg-slate-50 border-slate-200 text-slate-600'
         }`}>
-          <div className="relative flex h-3 w-3 shrink-0">
+          <div className="flex items-center gap-4">
+            <div className="relative flex h-3 w-3 shrink-0">
+              {botInfo?.active && botInfo?.enabled !== false && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              )}
+              <span className={`relative inline-flex rounded-full h-3 w-3 ${botInfo?.active && botInfo?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
+            </div>
+            <div className="flex-grow">
+              <span className="text-[10px] font-black uppercase tracking-wider block text-slate-400">{statusLabel}</span>
+              <span className="text-sm font-black block mt-0.5">
+                {botInfo?.active 
+                  ? (botInfo?.enabled !== false 
+                      ? (isIndo ? 'Aktif (Berjalan 24/7)' : '已启用 (24/7 运行中)') 
+                      : (isIndo ? 'Dimatikan (OFF)' : '已关停 (OFF)'))
+                  : inactiveLabel}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 self-end sm:self-center">
+            {/* Toggle Power Pill */}
             {botInfo?.active && (
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-3xs select-none">
+                <span className="text-xs font-bold text-slate-500 shrink-0">
+                  {isIndo ? 'Daya Bot:' : '电源开关:'}
+                </span>
+                <button
+                  onClick={() => toggleBotState(!(botInfo?.enabled !== false))}
+                  disabled={isToggling}
+                  type="button"
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    botInfo?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-300'
+                  } ${isToggling ? 'opacity-60 cursor-not-allowed' : ''}`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                      botInfo?.enabled !== false ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+                <span className={`text-xs font-black uppercase shrink-0 min-w-[24px] ${botInfo?.enabled !== false ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  {botInfo?.enabled !== false ? 'ON' : 'OFF'}
+                </span>
+              </div>
             )}
-            <span className={`relative inline-flex rounded-full h-3 w-3 ${botInfo?.active ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
+
+            {botInfo?.active && botInfo?.enabled !== false && botInfo.botUsername && (
+              <a
+                href={`https://t.me/${botInfo.botUsername}`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg transition shrink-0 shadow-xs"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                {openBotText}
+              </a>
+            )}
           </div>
-          <div className="flex-grow">
-            <span className="text-[10px] font-black uppercase tracking-wider block text-slate-400">{statusLabel}</span>
-            <span className="text-sm font-black block mt-0.5">
-              {botInfo?.active ? activeLabel : inactiveLabel}
-            </span>
-          </div>
-          {botInfo?.active && botInfo.botUsername && (
-            <a
-              href={`https://t.me/${botInfo.botUsername}`}
-              target="_blank"
-              rel="noreferrer"
-              className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg transition"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              {openBotText}
-            </a>
-          )}
         </div>
 
         <div className="bg-white p-5 rounded-2xl border border-slate-100 flex items-center justify-between gap-4 shadow-3xs">
@@ -248,106 +321,7 @@ export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
         )}
       </div>
 
-      {/* DETAILED USER GUIDE / TUTORIAL FOR FIELD ENGINEERS */}
-      <div className="flex flex-col gap-4 border-t border-slate-100 pt-6">
-        <h3 className="font-sans font-black text-sm text-slate-900 flex items-center gap-1.5 select-none">
-          <HelpCircle className="w-4 h-4 text-blue-600" />
-          {isIndo ? 'Panduan Penggunaan Untuk Tim Lapangan' : '外勤测量员电报离线回传使用说明'}
-        </h3>
 
-        {/* STEP 1: AUTHENTICATION */}
-        <div className="p-5 bg-slate-50/50 border border-slate-200/40 rounded-2xl flex flex-col gap-3.5">
-          <div className="flex items-start gap-3">
-            <UserCheck className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-            <div className="flex flex-col">
-              <h4 className="text-xs font-black text-slate-950">{authTitle}</h4>
-              <span className="text-[11px] text-slate-400 mt-0.5">{authDesc}</span>
-            </div>
-          </div>
-          <div className="bg-slate-900 text-slate-100 p-4 rounded-xl font-mono text-[11px] flex items-center justify-between gap-4 border border-slate-800 shadow-inner-xs">
-            <code className="select-all block">/auth surveyor@lxgroup.com</code>
-            <button
-              onClick={() => handleCopy('/auth surveyor@lxgroup.com', 'auth_ex')}
-              className="text-slate-400 hover:text-white transition"
-              title="Copy Command"
-            >
-              {copiedText === 'auth_ex' ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-            </button>
-          </div>
-          <p className="text-[11px] text-slate-400 italic">
-            {isIndo 
-              ? '*Catatan: Anda juga bisa menulis nomor telepon resmi terdaftar sebagai parameter.' 
-              : '* 提示：该命令后可跟您在后台系统中注册的任一 Surveyor 账号邮箱物理字符串或电话号码。会话一经关联终身有效。'}
-          </p>
-        </div>
-
-        {/* STEP 2: REPORT SUBMISSION WITH CAPTION PARSING */}
-        <div className="p-5 bg-slate-50/50 border border-slate-200/40 rounded-2xl flex flex-col gap-4">
-          <div className="flex items-start gap-3">
-            <Sparkles className="w-5 h-5 text-indigo-500 shrink-0 mt-0.5" />
-            <div className="flex flex-col">
-              <h4 className="text-xs font-black text-slate-950">{sendTitle}</h4>
-              <span className="text-[11px] text-slate-400 mt-0.5">{sendDesc}</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider">
-                {isIndo ? 'Contoh Format Bebas (Awal Baris)' : '推荐布局示例 A：多行非标签格式 (智能识别)'}
-              </span>
-              <div className="bg-slate-900 text-slate-200 p-4 rounded-xl font-mono text-[11px] h-36 flex flex-col justify-between border border-slate-800">
-                <pre className="text-left whitespace-pre-wrap select-all">
-{`江西抚州6
-抚州市临川区政务中心
-进行了现场光纤光传输布线工作。
-有长途线路2根，本地安装32根。`}
-                </pre>
-                <button
-                  onClick={() => handleCopy(`江西抚州6\n抚州市临川区政务中心\n进行了现场光纤光传输布线工作。\n有长途线路2根，本地安装32根。`, 'caption_ex_a')}
-                  className="self-end text-slate-400 hover:text-white transition"
-                >
-                  {copiedText === 'caption_ex_a' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-1.5">
-              <span className="text-[9px] font-black uppercase text-slate-400 tracking-wider">
-                {isIndo ? 'Contoh Format Berlabel' : '推荐布局示例 B：标准标签格式 (精确匹配)'}
-              </span>
-              <div className="bg-slate-900 text-slate-200 p-4 rounded-xl font-mono text-[11px] h-36 flex flex-col justify-between border border-slate-800">
-                <pre className="text-left whitespace-pre-wrap select-all block">
-{`Site A月湖
-Kategori: survey
-Operator: Eki Febriann
-Provinsi: 江西省
-Kota: 鹰潭市
-Kecamatan: 月湖区`}
-                </pre>
-                <button
-                  onClick={() => handleCopy(`Site A月湖\nKategori: survey\nOperator: Eki Febriann\nProvinsi: 江西省\nKota: 鹰潭市\nKecamatan: 月湖区`, 'caption_ex_b')}
-                  className="self-end text-slate-400 hover:text-white transition"
-                >
-                  {copiedText === 'caption_ex_b' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="text-[11px] text-slate-500 bg-white border border-slate-100 rounded-xl p-3 flex flex-col gap-2 shadow-inner-xs">
-            <span className="font-extrabold flex items-center gap-1 select-none">
-              <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-              {isIndo ? 'Mengapa menggunakan AI Gemini?' : '🤔 为什么可以通过 AI 自动提取字段？'}
-            </span>
-            <span>
-              {isIndo
-                ? 'Karena bot ini ditenagai model Gemini 2.5 Flash yang sangat cerdas di server. Dia akan menerjemahkan caption bebas Anda menjadi format database yang rapi, menentukan koordinat GPS yang sesuai secara otomatis, dan mengunggah gambar Anda ke Cloud Storage secara real-time.'
-                : '因为本项目搭载了高度成熟的 @google/genai 大语言模型！其能够毫秒级拆解分析外勤人员发送的随笔性中文或印尼语描述信息，自动规范省、市、区，通过地理名字库推算并填充准确的位置坐标(GPS)，并将您的多媒体文件上传存储至 Cloud Storage 存盘中。'}
-            </span>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

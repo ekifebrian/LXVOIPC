@@ -113,8 +113,24 @@ app.get("/api/telegram-info", async (req, res) => {
       active: false,
       botUsername: null,
       instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-      message: "Telegram Bot is currently disabled."
+      message: "Telegram Bot is currently disabled.",
+      enabled: false
     });
+  }
+
+  // Get current state from Firestore
+  let enabled = true;
+  try {
+    await getClientAuth();
+    const docSnap = await getDoc(doc(db, "settings", "telegram"));
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      if (data && typeof data.enabled === "boolean") {
+        enabled = data.enabled;
+      }
+    }
+  } catch (err) {
+    console.warn("Error reading telegram state from database, defaulting to true:", err);
   }
 
   try {
@@ -126,7 +142,8 @@ app.get("/api/telegram-info", async (req, res) => {
         botUsername: data.result.username,
         botFirstName: data.result.first_name,
         instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-        message: "Telegram Bot is active."
+        message: "Telegram Bot is active.",
+        enabled: enabled
       });
     }
   } catch (err) {
@@ -137,8 +154,51 @@ app.get("/api/telegram-info", async (req, res) => {
     active: true,
     botUsername: "Bot",
     instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-    message: "Telegram Bot is active."
+    message: "Telegram Bot is active.",
+    enabled: enabled
   });
+});
+
+// Endpoint to turn on/off the Telegram Bot webhook 24/7
+app.post("/api/telegram-toggle", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
+    return res.status(400).json({ ok: false, error: "Telegram Bot is not configured." });
+  }
+
+  const { enabled } = req.body;
+  if (typeof enabled !== "boolean") {
+    return res.status(400).json({ ok: false, error: "Invalid parameters" });
+  }
+
+  try {
+    // 1. Update Firestore settings using client SDK
+    await getClientAuth();
+    await setDoc(doc(db, "settings", "telegram"), { enabled }, { merge: true });
+
+    // 2. Based on state, set or delete webhook
+    const appUrl = process.env.APP_URL;
+    let successMsg = enabled ? "Bot has been activated 24/7." : "Bot has been deactivated.";
+    let telegramResult = null;
+
+    if (enabled) {
+      if (appUrl) {
+        const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
+        const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+        telegramResult = await response.json() as any;
+        console.log("[Telegram Switch ON] Webhook registration response:", telegramResult);
+      }
+    } else {
+      const response = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
+      telegramResult = await response.json() as any;
+      console.log("[Telegram Switch OFF] Webhook deleted response:", telegramResult);
+    }
+
+    return res.json({ ok: true, enabled, message: successMsg, telegramResult });
+  } catch (err: any) {
+    console.error("Error toggling telegram bot:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to toggle bot state" });
+  }
 });
 
 // Telegram Bot Webhook Receiver
@@ -1184,20 +1244,38 @@ async function startServer() {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const appUrl = process.env.APP_URL;
     if (token && token !== "YOUR_TELEGRAM_BOT_TOKEN" && appUrl && appUrl !== "MY_APP_URL") {
-      const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-      console.log(`[Telegram Setup] Registering webhook to ${webhookUrl}...`);
-      fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
-        .then(r => {
-          if (!r.ok) {
-            throw new Error(`HTTP error! status: ${r.status}`);
+      getClientAuth()
+        .then(() => getDoc(doc(db, "settings", "telegram")))
+        .then((docSnap) => {
+          let enabled = true;
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            if (data && typeof data.enabled === "boolean") {
+              enabled = data.enabled;
+            }
           }
-          return r.json();
+
+          if (enabled) {
+            const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
+            console.log(`[Telegram Setup] Bot is enabled in settings. Registering webhook to ${webhookUrl}...`);
+            fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
+              .then(r => r.json())
+              .then(data => console.log("[Telegram Setup] Webhook registration response:", data))
+              .catch(err => console.error("[Telegram Setup] Failed to register webhook on boot:", err));
+          } else {
+            console.log("[Telegram Setup] Bot is DISABLED in settings. Deleting webhook...");
+            fetch(`https://api.telegram.org/bot${token}/deleteWebhook`)
+              .then(r => r.json())
+              .then(data => console.log("[Telegram Setup] Webhook deleted on start:", data))
+              .catch(err => console.error("[Telegram Setup] Failed to delete webhook on boot:", err));
+          }
         })
-        .then(data => {
-          console.log("[Telegram Setup] Webhook registration response:", data);
-        })
-        .catch(err => {
-          console.error("[Telegram Setup] Failed to register webhook on boot:", err);
+        .catch((dbErr) => {
+          console.warn("[Telegram Setup] Database check failed, registering webhook as fallback:", dbErr);
+          const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
+          fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
+            .then(r => r.json())
+            .catch(err => {});
         });
     } else {
       console.log("[Telegram Setup] Webhook auto-registration skipped: Token or APP_URL is unconfigured/placeholder.");
