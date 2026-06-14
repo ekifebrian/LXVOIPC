@@ -9,6 +9,7 @@ import BuildingDetail from './components/BuildingDetail';
 import AdminPanel, { isMediaVideo } from './components/AdminPanel';
 import LoginView from './components/LoginView';
 import InteractiveMap from './components/InteractiveMap';
+import TelegramBotConfig from './components/TelegramBotConfig';
 import { AnimatePresence, motion } from 'motion/react';
 import { 
   LayoutDashboard, 
@@ -27,7 +28,8 @@ import {
   Eye,
   Check,
   AlertCircle,
-  X
+  X,
+  Bot
 } from 'lucide-react';
 import { Language, translations } from './languages';
 
@@ -871,6 +873,24 @@ export default function App() {
               </div>
             )}
 
+            {/* Group 6: Telegram Integration */}
+            {(isAdmin || isSurveyor) && (
+              <div className="flex flex-col gap-1.5 border-t border-slate-800/60 pt-4">
+                <span className="text-[10px] uppercase font-black tracking-widest text-slate-500 pl-4">
+                  {lang === 'id' ? 'INTEGRASI' : '服务集成'}
+                </span>
+                <div className="flex flex-col gap-1">
+                  <button
+                    onClick={() => { setSidebarTab('telegram_bot'); setSidebarOpen(false); }}
+                    className={`w-full text-left py-2.5 px-4 rounded-xl flex items-center gap-3 transition cursor-pointer ${sidebarTab === 'telegram_bot' ? 'bg-slate-800 text-white font-bold border-l-4 border-blue-500' : 'hover:bg-slate-800/35'}`}
+                  >
+                    <Bot className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                    <span>{lang === 'id' ? 'Bot Telegram' : '电报机器人'}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
           </nav>
         </div>
 
@@ -1391,6 +1411,13 @@ export default function App() {
                 activeWorkspaceTab={sidebarTab}
                 buildings={activeRecords}
               />
+            </div>
+          )}
+
+          {/* TAB 9: Telegram Bot configuration and linking tutorial */}
+          {sidebarTab === 'telegram_bot' && (
+            <div className="max-w-4xl w-full mx-auto animate-fade-in">
+              <TelegramBotConfig lang={lang} />
             </div>
           )}
 

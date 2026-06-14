@@ -44,14 +44,84 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// API route to let the frontend know the Telegram Bot status (Disabled)
+// API route to let the frontend know the Telegram Bot status
 app.get("/api/telegram-info", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
+    return res.json({
+      active: false,
+      botUsername: null,
+      instructionsUrl: process.env.APP_URL || "http://localhost:3000",
+      message: "Telegram Bot is currently disabled."
+    });
+  }
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);
+    const data = await response.json() as any;
+    if (data.ok && data.result) {
+      return res.json({
+        active: true,
+        botUsername: data.result.username,
+        botFirstName: data.result.first_name,
+        instructionsUrl: process.env.APP_URL || "http://localhost:3000",
+        message: "Telegram Bot is active."
+      });
+    }
+  } catch (err) {
+    console.error("Error fetching bot info from Telegram:", err);
+  }
+
   res.json({
-    active: false,
-    botUsername: null,
+    active: true,
+    botUsername: "Bot",
     instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-    message: "Telegram Bot is currently disabled."
+    message: "Telegram Bot is active."
   });
+});
+
+// Telegram Bot Webhook Receiver
+app.post("/api/telegram-webhook", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    return res.status(400).send("Telegram token not configured.");
+  }
+  
+  try {
+    const update = req.body;
+    if (update) {
+      await handleTelegramUpdate(update, token);
+    }
+    res.status(200).send("OK");
+  } catch (err) {
+    console.error("Error handling telegram update:", err);
+    res.status(500).send("Internal Error");
+  }
+});
+
+// Manual setup of Telegram Bot Webhook
+app.post("/api/manual-webhook-setup", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
+    return res.status(400).json({ ok: false, error: "Telegram Bot Token is not configured on the server." });
+  }
+
+  const { customUrl } = req.body;
+  if (!customUrl || typeof customUrl !== "string" || !customUrl.startsWith("https://")) {
+    return res.status(400).json({ ok: false, error: "Custom webhook URL must start with https://" });
+  }
+
+  const webhookUrl = `${customUrl.replace(/\/$/, "")}/api/telegram-webhook`;
+  console.log(`[Manual Setup] Attempting to register webhook to: ${webhookUrl}`);
+
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
+    const data = await response.json() as any;
+    return res.json({ ok: true, data });
+  } catch (err: any) {
+    console.error("[Manual Setup] Failed to register webhook via API call:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Failed to set webhook" });
+  }
 });
 
 // Proxy endpoint for Gaode Map (Amap) Input Tips (Autocomplete) and forward geocoding
@@ -215,20 +285,37 @@ app.get("/api/amap/regeo", async (req, res) => {
   return res.json({ source: "none", province: "", city: "", district: "", formatted_address: "" });
 });
 
-// Telegram message processor core (Disabled)
-async function handleTelegramUpdate(update: any, token: string) {
-  return;
+const authenticatedSessions: Record<string, any> = {};
+
+async function getTelegramSession(chatId: string | number): Promise<any> {
+  const cidStr = String(chatId);
+  if (authenticatedSessions[cidStr]) {
+    return authenticatedSessions[cidStr];
+  }
+  try {
+    const docSnap = await adminDb.collection("telegram_sessions").doc(cidStr).get();
+    if (docSnap.exists) {
+      const data = docSnap.data();
+      authenticatedSessions[cidStr] = data;
+      return data;
+    }
+  } catch (err) {
+    console.error("Failed to fetch telegram session from firestore:", err);
+  }
+  return null;
 }
 
-async function unused_placeholder() {
-  const token = "";
-  const authenticatedSessions: Record<string, any> = {};
-  const ensureAuthenticated = async () => {};
-  const message = { chat: { id: 0 }, text: "", caption: "", from: { username: "", first_name: "" }, photo: [] as any[], video: null as any };
+// Telegram message processor core (Active)
+async function handleTelegramUpdate(update: any, token: string) {
+  const message = update.message || update.edited_message;
+  if (!message || !message.chat) {
+    return;
+  }
+
   const chatId = message.chat.id;
   const text = message.text || "";
   const caption = message.caption || "";
-  const username = message.from.username || message.from.first_name || "User";
+  const username = (message.from && (message.from.username || message.from.first_name)) || "User";
 
   // 1. Handshake commands
   if (text.startsWith("/start") || text.startsWith("/help")) {
@@ -387,7 +474,8 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
       await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
 
       // Verify Surveyor session identity
-      const activeSession = authenticatedSessions[String(chatId)] || {
+      const dbSession = await getTelegramSession(chatId);
+      const activeSession = dbSession || {
         name: username,
         email: "",
         phone: "",
@@ -395,9 +483,9 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         userUid: "telegram_" + chatId
       };
 
-      // Parse details directly without AI Gemini for instant synchronized results (as requested)
+      // Parse details with AI Gemini for high-fidelity smart extraction if available
       const analysisText = caption.trim() || text.trim() || `Site baru oleh ${activeSession.name}`;
-      const parsedRecord = fallbackRegexParser(analysisText, activeSession.name);
+      const parsedRecord = await extractStructuredRecordWithGemini(analysisText, activeSession.name);
 
       // Set the uploaded gallery file
       parsedRecord.gallery = [mediaUrl];
@@ -705,6 +793,29 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`⚡️ Fullstack LXVOIP Application listening on http://0.0.0.0:${PORT}`);
+
+    // Register Telegram Bot Webhook on boot automatically
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const appUrl = process.env.APP_URL;
+    if (token && token !== "YOUR_TELEGRAM_BOT_TOKEN" && appUrl && appUrl !== "MY_APP_URL") {
+      const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
+      console.log(`[Telegram Setup] Registering webhook to ${webhookUrl}...`);
+      fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
+        .then(r => {
+          if (!r.ok) {
+            throw new Error(`HTTP error! status: ${r.status}`);
+          }
+          return r.json();
+        })
+        .then(data => {
+          console.log("[Telegram Setup] Webhook registration response:", data);
+        })
+        .catch(err => {
+          console.error("[Telegram Setup] Failed to register webhook on boot:", err);
+        });
+    } else {
+      console.log("[Telegram Setup] Webhook auto-registration skipped: Token or APP_URL is unconfigured/placeholder.");
+    }
   });
 }
 
