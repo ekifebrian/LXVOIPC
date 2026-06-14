@@ -375,6 +375,59 @@ async function getTelegramSession(chatId: string | number): Promise<any> {
   return null;
 }
 
+const messages = {
+  id: {
+    mediaGroupStart: "⚡️ *Grup media diterima! Sedang mengumpulkan semua foto & video dari album...*",
+    mediaGroupProcessing: "🤖 *Berhasil mengumpulkan {count} media dari album. Mengunggah berkas ke cloud...*",
+    mediaGroupFail: "❌ Gagal mengunggah satupun berkas media dari album Anda.",
+    mediaGroupAnalysis: "🤖 *Mengunduh & memproses media selesai. Menganalisis caption data lapangan dengan AI Gemini...*",
+    mediaGroupSuccessHeader: "✅ *DATA LAPANGAN ALBUM BERHASIL DISINKRONKAN!*",
+    singleMediaReceived: "⚡️ *Berkas lapangan diterima! Sedang mengunggah ke server cloud...*",
+    singleMediaAnalysis: "🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*",
+    singleMediaSuccessHeader: "✅ *DATA LAPANGAN BERHASIL DISINKRONKAN!*",
+    authRequired: "⚠️ Silakan isi email atau telepon Anda yang terdaftar.\nFormat: `/auth [email_atau_telepon]`",
+    authSearching: "🔍 Menyelidiki database Surveyor untuk \"{input}\"...",
+    authNotFound: "❌ Akun \"{input}\" tidak terdaftar di sistem. Harap hubungi administrator pusat untuk mendaftarkan akun Surveyor Anda terlebih dahulu.",
+    authDbError: "⚠️ Terjadi kesalahan internal database saat mendaftarkan sesi. Hubungi teknisi kami. Detail Error: {err}",
+    fallbackGuidance: "💡 *Butuh bantuan?* Harap kirimkan foto atau video lapangan yang ingin didokumentasikan, sertakan informasi penting pada bagian caption/keterangan gambar!",
+    syncFailed: "⚠️ Gagal sinkronisasi data lapangan: {err}. Harap coba kembali.",
+    labelName: "Nama",
+    labelCategory: "Kategori",
+    labelOperator: "Operator",
+    labelPosisi: "Posisi",
+    labelWilayah: "Wilayah",
+    labelDeskripsi: "Deskripsi",
+    labelMediaCount: "Jumlah Media",
+    mediaSavedCount: "berkas berhasil disimpan di galeri",
+    portalLinkText: "Buka platform utama untuk melihat langsung"
+  },
+  zh: {
+    mediaGroupStart: "⚡️ *群组媒体已收到！正在从相册收集所有照片与视频...*",
+    mediaGroupProcessing: "🤖 *成功收集相册中的 {count} 个媒体。正在上传文件到云端...*",
+    mediaGroupFail: "❌ 无法上传您相册中的任何媒体文件。",
+    mediaGroupAnalysis: "🤖 *下载并处理媒体已完成。正在使用 Gemini AI 分析现场说明数据...*",
+    mediaGroupSuccessHeader: "✅ *相册现场数据同步成功！*",
+    singleMediaReceived: "⚡️ *现场文件已收到！正在上传至云端服务器...*",
+    singleMediaAnalysis: "🤖 *媒体成功保存到云端。正在使用 Gemini AI 分析现场说明数据...*",
+    singleMediaSuccessHeader: "✅ *现场数据同步成功！*",
+    authRequired: "⚠️ 请填写您已注册的邮箱或电话。\n格式: `/auth [邮箱_或_电话]`",
+    authSearching: "🔍 正在数据库中查询测量员 \"{input}\"...",
+    authNotFound: "❌ 账户 \"{input}\" 未在系统中注册。请先联系中心管理员注册您的测量员账户。",
+    authDbError: "⚠️ 注册会话时发生内部数据库错误。请联系我们的技术人员。错误详情: {err}",
+    fallbackGuidance: "💡 *需要帮助吗？* 请发送您要归档的现场照片或视频，并在说明（caption）中附上重要信息！",
+    syncFailed: "⚠️ 同步现场数据失败: {err}。请重试。",
+    labelName: "名称",
+    labelCategory: "类别",
+    labelOperator: "操作员",
+    labelPosisi: "位置",
+    labelWilayah: "区域",
+    labelDeskripsi: "描述",
+    labelMediaCount: "媒体数量",
+    mediaSavedCount: "个文件成功保存到图库",
+    portalLinkText: "打开主平台直接查看"
+  }
+};
+
 // Media item details for media groups
 interface PendingMediaItem {
   fileId: string;
@@ -439,7 +492,12 @@ async function processMediaGroup(group: PendingMediaGroup, token: string) {
   const username = group.username;
 
   try {
-    await sendTelegramMessage(chatId, `🤖 *Berhasil mengumpulkan ${group.mediaList.length} media dari album. Mengunggah berkas ke cloud...*`, token);
+    // Determine language from session
+    const dbSession = await getTelegramSession(chatId);
+    const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
+    const msg = messages[lang];
+
+    await sendTelegramMessage(chatId, msg.mediaGroupProcessing.replace("{count}", String(group.mediaList.length)), token);
 
     // Upload all files in parallel
     const uploadPromises = group.mediaList.map(async (media) => {
@@ -456,20 +514,19 @@ async function processMediaGroup(group: PendingMediaGroup, token: string) {
     const mediaUrls = results.filter((url): url is string => url !== null);
 
     if (mediaUrls.length === 0) {
-      await sendTelegramMessage(chatId, `❌ Gagal mengunggah satupun berkas media dari album Anda.`, token);
+      await sendTelegramMessage(chatId, msg.mediaGroupFail, token);
       return;
     }
 
-    await sendTelegramMessage(chatId, `🤖 *Mengunduh & memproses media selesai. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
+    await sendTelegramMessage(chatId, msg.mediaGroupAnalysis, token);
 
-    // Verify Surveyor session identity
-    const dbSession = await getTelegramSession(chatId);
     const activeSession = dbSession || {
       name: username,
       email: "",
       phone: "",
       role: "unverified_telegram",
-      userUid: "telegram_" + chatId
+      userUid: "telegram_" + chatId,
+      lang: "id"
     };
 
     // Combine all unique captions & text
@@ -494,23 +551,30 @@ async function processMediaGroup(group: PendingMediaGroup, token: string) {
 
     const portalUrl = process.env.APP_URL || "https://ai.studio/build";
 
-    const confirmationMsg = `✅ *DATA LAPANGAN ALBUM BERHASIL DISINKRONKAN!*
+    const confirmationMsg = `${msg.mediaGroupSuccessHeader}
 ----------------------------------------
-📌 *Nama:* ${parsedRecord.name}
-📂 *Kategori:* ${parsedRecord.category.toUpperCase()}
-👤 *Operator:* ${parsedRecord.operator}
-📍 *Posisi:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
-🗺️ *Wilayah:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
-📝 *Deskripsi:* ${parsedRecord.description}
-🖼️ *Jumlah Media:* ${mediaUrls.length} berkas berhasil disimpan di galeri!
+📌 *${msg.labelName}:* ${parsedRecord.name}
+📂 *${msg.labelCategory}:* ${parsedRecord.category.toUpperCase()}
+👤 *${msg.labelOperator}:* ${parsedRecord.operator}
+📍 *${msg.labelPosisi}:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
+🗺️ *${msg.labelWilayah}:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
+📝 *${msg.labelDeskripsi}:* ${parsedRecord.description}
+🖼️ *${msg.labelMediaCount}:* ${mediaUrls.length} ${msg.mediaSavedCount}!
 
-🔗 *Buka platform utama untuk melihat langsung:*
+🔗 *${msg.portalLinkText}:*
 👉 ${portalUrl}`;
 
     await sendTelegramMessage(chatId, confirmationMsg, token);
   } catch (err: any) {
     console.error("Failed to process Telegram media group upload:", err);
-    await sendTelegramMessage(chatId, `⚠️ Gagal sinkronisasi data lapangan grup: ${err.message || err}. Harap coba kembali.`, token);
+    try {
+      const dbSession = await getTelegramSession(chatId);
+      const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
+      const msg = messages[lang];
+      await sendTelegramMessage(chatId, msg.syncFailed.replace("{err}", err.message || err), token);
+    } catch (innerErr) {
+      await sendTelegramMessage(chatId, `⚠️ Gagal sinkronisasi: ${err.message || err}`, token);
+    }
   }
 }
 
@@ -526,36 +590,70 @@ async function handleTelegramUpdate(update: any, token: string) {
   const caption = message.caption || "";
   const username = (message.from && (message.from.username || message.from.first_name)) || "User";
 
+  // Load language settings for this session
+  const dbSession = await getTelegramSession(chatId);
+  const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
+  const msg = messages[lang];
+
+  // Language Selection Actions (triggered from keyboard buttons or manually)
+  if (text === "🇮🇩 Bahasa Indonesia" || text === "/lang_id") {
+    const sessionRef = doc(db, "telegram_sessions", String(chatId));
+    await setDoc(sessionRef, { lang: "id" }, { merge: true });
+    
+    // Update local memory cache helper
+    if (authenticatedSessions[String(chatId)]) {
+      authenticatedSessions[String(chatId)].lang = "id";
+    } else {
+      authenticatedSessions[String(chatId)] = { lang: "id" };
+    }
+
+    const welcomeText = `Selamat datang di Bot LXVOIP Database !!
+
+Cara penggunaan
+Ketik
+
+1. /auth [email]
+2. upload/forward foto beserta captionya seperti contoh`;
+
+    const guidePhotoUrl = "https://i.postimg.cc/52c42fvc/8F42ED6D-13EE-473A-ADC6-D2FEC07B29DB.png";
+    await sendTelegramPhoto(chatId, guidePhotoUrl, welcomeText, token, { remove_keyboard: true });
+    return;
+  }
+
+  if (text === "🇨🇳 中文" || text === "/lang_zh") {
+    const sessionRef = doc(db, "telegram_sessions", String(chatId));
+    await setDoc(sessionRef, { lang: "zh" }, { merge: true });
+    
+    // Update local memory cache helper
+    if (authenticatedSessions[String(chatId)]) {
+      authenticatedSessions[String(chatId)].lang = "zh";
+    } else {
+      authenticatedSessions[String(chatId)] = { lang: "zh" };
+    }
+
+    const welcomeText = `欢迎使用 LXVOIP 数据库机器人 !!
+
+使用方法
+输入
+
+1. /auth [邮箱]
+2. 像示例一样上传/转发照片及其说明（caption）`;
+
+    const guidePhotoUrl = "https://i.postimg.cc/52c42fvc/8F42ED6D-13EE-473A-ADC6-D2FEC07B29DB.png";
+    await sendTelegramPhoto(chatId, guidePhotoUrl, welcomeText, token, { remove_keyboard: true });
+    return;
+  }
+
   // 1. Handshake commands
-  if (text.startsWith("/start") || text.startsWith("/help")) {
-    const welcomeText = `🤖 *Halo / 您好! Selamat datang di Bot LXVOIP Data Center!* 
-
-Saya adalah asisten bot untuk membantu para surveyor dan admin mengunggah data survei, pengukuran kabel, dan instalasi langsung dari lapangan!
-
-📌 *Cara Penggunaan / 使用方法:*
-1. Kirim *Foto* atau *Video* lapangan Anda.
-2. Di dalam *Caption (Keterangan teks)* foto tersebut, tuliskan detail datanya. Anda bebas menulis dalam format apa saja (AI Gemini akan menganalisis & mengisinya secara otomatis!), contoh:
-
-\`\`\`
-Site A月湖
-Kategori: survey
-Operator: Eki Febriann
-Provinsi: 江西省
-Kota: 鹰潭市
-Kecamatan: 月湖区
-Latitude: -6.12
-Longitude: 106.82
-Deskripsi: Tiang terpasang kokoh, aman terkendali.
-\`\`\`
-
-💡 *Fitur Autentikasi Surveyor:*
-Untuk menautkan akun telegram Anda dengan nama Surveyor resmi di sistem:
-Ketik: \`/auth [email_atau_nomor_telepon]\`
-Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
-
-🚀 *Kirim foto sekarang untuk mencoba!*`;
-
-    await sendTelegramMessage(chatId, welcomeText, token);
+  if (text.startsWith("/start") || text.startsWith("/help") || text.startsWith("/lang")) {
+    const replyKeyboard = {
+      keyboard: [
+        [ { text: "🇮🇩 Bahasa Indonesia" }, { text: "🇨🇳 中文" } ]
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: true
+    };
+    await sendTelegramMessage(chatId, "Pilihlah bahasa Anda / 请选择您的语言:", token, replyKeyboard);
     return;
   }
 
@@ -563,12 +661,12 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
   if (text.startsWith("/auth")) {
     const parts = text.split(/\s+/);
     if (parts.length < 2) {
-      await sendTelegramMessage(chatId, `⚠️ Silakan isi email atau telepon Anda yang terdaftar.\nFormat: \`/auth [email_atau_telepon]\``, token);
+      await sendTelegramMessage(chatId, msg.authRequired, token);
       return;
     }
     const input = parts[1].trim().toLowerCase();
     
-    await sendTelegramMessage(chatId, `🔍 Menyelidiki database Surveyor untuk "${input}"...`, token);
+    await sendTelegramMessage(chatId, msg.authSearching.replace("{input}", input), token);
     
     let matchedSurveyor: any = null;
     let matchedSurveyorId = "";
@@ -621,21 +719,22 @@ Contoh: \`/auth surveyor@lxgroup.com\` atau \`/auth 08123456789\`
           email: matchedSurveyor.email || "",
           phone: matchedSurveyor.phone || "",
           role: categoryFound,
-          userUid: matchedSurveyorId
+          userUid: matchedSurveyorId,
+          lang: lang
         };
 
         const successText = `🎉 *Autentikasi Berhasil! / 验证成功！*
-👤 *Nama:* ${name}
-📂 *Role:* ${categoryFound.toUpperCase()}
+👤 *Nama / 姓名:* ${name}
+📂 *Role / 角色:* ${categoryFound.toUpperCase()}
 
-Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas nama Anda sebagai operator resmi!`;
+${lang === "zh" ? "现在，您发送给此机器人的每张照片或视频都将以您的名义记录为官方操作员！" : "Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas nama Anda sebagai operator resmi!"}`;
         await sendTelegramMessage(chatId, successText, token);
       } else {
-        await sendTelegramMessage(chatId, `❌ Akun "${input}" tidak terdaftar di sistem. Harap hubungi administrator pusat untuk mendaftarkan akun Surveyor Anda terlebih dahulu.`, token);
+        await sendTelegramMessage(chatId, msg.authNotFound.replace("{input}", input), token);
       }
     } catch (err: any) {
       console.error("Auth query issue:", err);
-      await sendTelegramMessage(chatId, `⚠️ Terjadi kesalahan internal database saat mendaftarkan sesi. Hubungi teknisi kami. Detail Error: ${err.message || err}`, token);
+      await sendTelegramMessage(chatId, msg.authDbError.replace("{err}", err.message || err), token);
     }
     return;
   }
@@ -659,7 +758,7 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
       };
       
       // Notify only once per group
-      await sendTelegramMessage(chatId, `⚡️ *Grup media diterima! Sedang mengumpulkan semua foto & video dari album...*`, token);
+      await sendTelegramMessage(chatId, msg.mediaGroupStart, token);
     }
 
     const groupRef = pendingMediaGroups[mediaGroupId];
@@ -705,7 +804,7 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
 
   if (isPhoto || isVideo) {
     // Acknowledge receipt
-    await sendTelegramMessage(chatId, `⚡️ *Berkas lapangan diterima! Sedang mengunggah ke server cloud...*`, token);
+    await sendTelegramMessage(chatId, msg.singleMediaReceived, token);
 
     try {
       let fileId = "";
@@ -727,16 +826,16 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
       // Upload file cleanly using helper
       const mediaUrl = await uploadSingleTelegramFile(fileId, fileName, mimeType, token);
 
-      await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
+      await sendTelegramMessage(chatId, msg.singleMediaAnalysis, token);
 
       // Verify Surveyor session identity
-      const dbSession = await getTelegramSession(chatId);
       const activeSession = dbSession || {
         name: username,
         email: "",
         phone: "",
         role: "unverified_telegram",
-        userUid: "telegram_" + chatId
+        userUid: "telegram_" + chatId,
+        lang: "id"
       };
 
       // Parse details with AI Gemini for high-fidelity smart extraction if available
@@ -758,29 +857,29 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
 
       const portalUrl = process.env.APP_URL || "https://ai.studio/build";
 
-      const confirmationMsg = `✅ *DATA LAPANGAN BERHASIL DISINKRONKAN!*
+      const confirmationMsg = `${msg.singleMediaSuccessHeader}
 ----------------------------------------
-📌 *Nama:* ${parsedRecord.name}
-📂 *Kategori:* ${parsedRecord.category.toUpperCase()}
-👤 *Operator:* ${parsedRecord.operator}
-📍 *Posisi:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
-🗺️ *Wilayah:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
-📝 *Deskripsi:* ${parsedRecord.description}
+📌 *${msg.labelName}:* ${parsedRecord.name}
+📂 *${msg.labelCategory}:* ${parsedRecord.category.toUpperCase()}
+👤 *${msg.labelOperator}:* ${parsedRecord.operator}
+📍 *${msg.labelPosisi}:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
+🗺️ *${msg.labelWilayah}:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
+📝 *${msg.labelDeskripsi}:* ${parsedRecord.description}
 
-🔗 *Buka platform utama untuk melihat langsung:*
+🔗 *${msg.portalLinkText}:*
 👉 ${portalUrl}`;
 
       await sendTelegramMessage(chatId, confirmationMsg, token);
     } catch (err: any) {
       console.error("Failed to compile Telegram upload:", err);
-      await sendTelegramMessage(chatId, `⚠️ Gagal sinkronisasi data lapangan: ${err.message || err}. Harap coba kembali.`, token);
+      await sendTelegramMessage(chatId, msg.syncFailed.replace("{err}", err.message || err), token);
     }
     return;
   }
 
   // Fallback chat guidance for random unhandled text
   if (text) {
-    await sendTelegramMessage(chatId, `💡 *Butuh bantuan?* Harap kirimkan foto atau video lapangan yang ingin didokumentasikan, sertakan informasi penting pada bagian caption/keterangan gambar!`, token);
+    await sendTelegramMessage(chatId, msg.fallbackGuidance, token);
   }
 }
 
@@ -809,19 +908,50 @@ async function downloadTelegramFile(filePath: string, token: string): Promise<Bu
   return null;
 }
 
-async function sendTelegramMessage(chatId: string | number, text: string, token: string) {
+async function sendTelegramMessage(chatId: string | number, text: string, token: string, replyMarkup?: any) {
   try {
+    const payload: any = {
+      chat_id: chatId,
+      text: text,
+      parse_mode: "Markdown"
+    };
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text,
-        parse_mode: "Markdown"
-      })
+      body: JSON.stringify(payload)
     });
   } catch (err) {
     console.error("Failed to send message to telegram:", err);
+  }
+}
+
+async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any) {
+  try {
+    const payload: any = {
+      chat_id: chatId,
+      photo: photoUrl,
+      caption: caption,
+      parse_mode: "Markdown"
+    };
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn("[Telegram sendPhoto Error, falling back to sendMessage]:", errText);
+      await sendTelegramMessage(chatId, caption, token, replyMarkup);
+    }
+  } catch (err) {
+    console.error("Failed to send photo to Telegram, falling back to text:", err);
+    await sendTelegramMessage(chatId, caption, token, replyMarkup);
   }
 }
 
