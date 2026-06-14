@@ -12,6 +12,7 @@ import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInAnony
 import { getApps, initializeApp, getApp } from "firebase-admin/app";
 import { getAuth } from "firebase-admin/auth";
 import { getFirestore, FieldValue, Firestore } from "firebase-admin/firestore";
+import { getStorage } from "firebase-admin/storage";
 import { readFileSync } from "fs";
 
 dotenv.config();
@@ -480,21 +481,21 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         return;
       }
 
-      // Ensure the backend has an authenticated Firebase session (Anonymous) so Firebase Storage security rules are satisfied.
-      if (!auth.currentUser) {
-        try {
-          await signInAnonymously(auth);
-          console.log("[Firebase Storage Upload] Authenticated anonymously to permit secure writes");
-        } catch (authErr) {
-          console.warn("[Firebase Storage Upload] Anonymous login failed/skipped, attempting upload anyway:", authErr);
+      // Store in Firebase Storage using the Admin SDK (completely bypasses client security rules)
+      const downloadToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+      const bucket = getStorage().bucket();
+      const fileRef = bucket.file(`buildings/telegram/${fileName}`);
+      
+      await fileRef.save(Buffer.from(fileBuffer), {
+        metadata: {
+          contentType: mimeType,
+          metadata: {
+            firebaseStorageDownloadTokens: downloadToken
+          }
         }
-      }
-
-      // Store in Firebase Storage using the Client SDK
-      const userUid = auth.currentUser?.uid || "telegram";
-      const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
-      const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
-      const mediaUrl = await getDownloadURL(uploadBytesResult.ref);
+      });
+      
+      const mediaUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileRef.name)}?alt=media&token=${downloadToken}`;
 
       await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
 
