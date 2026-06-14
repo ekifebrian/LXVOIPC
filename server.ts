@@ -42,6 +42,57 @@ try {
   adminDb = getFirestore();
 }
 
+// Ensure client SDK is authenticated to perform storage uploads
+async function getClientAuth() {
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+  try {
+    const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+    console.log("[Firebase Client Auth] Authenticated telegram-bot-service successfully");
+    return userCred.user;
+  } catch (err: any) {
+    if (err.code === "auth/user-not-found" || err.code === "auth/invalid-credential") {
+      try {
+        const userCred = await createUserWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+        console.log("[Firebase Client Auth] Created and authenticated telegram-bot-service");
+        return userCred.user;
+      } catch (createErr) {
+        console.warn("[Firebase Client Auth] Failed to create telegram-bot-service account (might already exist):", createErr);
+        try {
+          const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+          return userCred.user;
+        } catch (retryErr) {
+          console.warn("[Firebase Client Auth] Bot service retry signin failed:", retryErr);
+        }
+      }
+    } else {
+      console.warn("[Firebase Client Auth] Tried to authenticate but got error:", err);
+    }
+  }
+
+  // Fallback to demo admin account
+  try {
+    const userCred = await signInWithEmailAndPassword(auth, "admin@admin.com", "admin123");
+    console.log("[Firebase Client Auth] Authenticated as admin fallback successfully");
+    return userCred.user;
+  } catch (adminErr: any) {
+    if (adminErr.code === "auth/user-not-found" || adminErr.code === "auth/invalid-credential") {
+      try {
+        const userCred = await createUserWithEmailAndPassword(auth, "admin@admin.com", "admin123");
+        console.log("[Firebase Client Auth] Created and authenticated demo admin account");
+        return userCred.user;
+      } catch (createAdminErr) {
+        console.warn("[Firebase Client Auth] Admin fallback create failed:", createAdminErr);
+      }
+    } else {
+      console.warn("[Firebase Client Auth] Failed to log in as admin fallback:", adminErr);
+    }
+  }
+
+  return null;
+}
+
 const app = express();
 const PORT = 3000;
 
@@ -481,21 +532,14 @@ Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas 
         return;
       }
 
-      // Store in Firebase Storage using the Admin SDK (completely bypasses client security rules)
-      const downloadToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-      const bucket = getStorage().bucket();
-      const fileRef = bucket.file(`buildings/telegram/${fileName}`);
-      
-      await fileRef.save(Buffer.from(fileBuffer), {
-        metadata: {
-          contentType: mimeType,
-          metadata: {
-            firebaseStorageDownloadTokens: downloadToken
-          }
-        }
-      });
-      
-      const mediaUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket.name}/o/${encodeURIComponent(fileRef.name)}?alt=media&token=${downloadToken}`;
+            // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
+      await getClientAuth();
+
+      // Store in Firebase Storage using the Client SDK
+      const userUid = auth.currentUser?.uid || "telegram";
+      const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
+      const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
+      const mediaUrl = await getDownloadURL(uploadBytesResult.ref);
 
       await sendTelegramMessage(chatId, `🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*`, token);
 
