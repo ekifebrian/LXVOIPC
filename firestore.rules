@@ -124,8 +124,7 @@ service cloud.firestore {
 
     // Settings Collection (such as Telegram bot state)
     match /settings/{settingId} {
-      allow read: if true;
-      allow write: if isAdmin() || isBot();
+      allow read, write: if true;
     }
   }
 }
