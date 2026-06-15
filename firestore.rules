@@ -14,8 +14,8 @@ service cloud.firestore {
 
     function isAdmin() {
       return isSignedIn() && (
-        request.auth.token.email == 'ekifebriann16@gmail.com' ||
-        request.auth.token.email == 'admin@admin.com' ||
+        ('email' in request.auth.token && request.auth.token.email == 'ekifebriann16@gmail.com') ||
+        ('email' in request.auth.token && request.auth.token.email == 'admin@admin.com') ||
         exists(/databases/$(database)/documents/admins/$(request.auth.uid))
       );
     }
@@ -23,12 +23,12 @@ service cloud.firestore {
     function isSurveyor() {
       return isSignedIn() && (
         exists(/databases/$(database)/documents/surveyors/$(request.auth.uid)) ||
-        request.auth.token.email == 'kahwin1@lxvoip.com'
+        ('email' in request.auth.token && request.auth.token.email == 'kahwin1@lxvoip.com')
       );
     }
 
     function isBot() {
-      return isSignedIn() && request.auth.token.email == 'telegram-bot-service@lxvoip.com';
+      return isSignedIn() && 'email' in request.auth.token && request.auth.token.email == 'telegram-bot-service@lxvoip.com';
     }
 
     function isValidId(id) {
