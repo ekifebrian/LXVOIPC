@@ -1,1472 +1,431 @@
-process.env.GOOGLE_CLOUD_FIRESTORE_TELEMETRY_DISABLED = "true";
+import React, { useState, useEffect } from 'react';
+import { Bot, Check, Copy, ExternalLink, HelpCircle, RefreshCw, Send, ShieldAlert, Sparkles, UserCheck, Globe, Terminal, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { Language } from '../languages';
 
-import express from "express";
-import path from "path";
-import { createServer as createViteServer } from "vite";
-import { GoogleGenAI, Type } from "@google/genai";
-import { doc, setDoc, getDoc, query, collection, where, getDocs, serverTimestamp } from "firebase/firestore";
-import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
-import { db, storage, auth } from "./src/firebase";
-import dotenv from "dotenv";
-import { signInWithEmailAndPassword, createUserWithEmailAndPassword, signInAnonymously } from "firebase/auth";
-import { getApps, initializeApp, getApp } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { getFirestore, FieldValue, Firestore } from "firebase-admin/firestore";
-import { getStorage } from "firebase-admin/storage";
-import fs, { readFileSync } from "fs";
-
-dotenv.config();
-
-// Initialize Firebase Admin SDK using applet configurations
-if (getApps().length === 0) {
-  try {
-    const firebaseConfig = JSON.parse(readFileSync("./firebase-applet-config.json", "utf-8"));
-    initializeApp({
-      projectId: firebaseConfig.projectId,
-      storageBucket: firebaseConfig.storageBucket
-    });
-    console.log("[Firebase Admin Setup] Successfully initialized Admin SDK");
-  } catch (adminErr) {
-    console.warn("[Firebase Admin Setup] Warning/Error initializing admin SDK:", adminErr);
-  }
+interface TelegramBotConfigProps {
+  lang: Language;
 }
 
-// Instantiate specific adminDb firestore client to bypass client security rules for background service tasks
-let adminDb: Firestore;
-try {
-  const firebaseConfig = JSON.parse(readFileSync("./firebase-applet-config.json", "utf-8"));
-  const databaseId = firebaseConfig.firestoreDatabaseId || "";
-  const mainApp = getApps().length > 0 ? getApp() : undefined;
-  adminDb = databaseId ? getFirestore(mainApp, databaseId) : getFirestore();
-} catch (e) {
-  adminDb = getFirestore();
+interface BotInfo {
+  active: boolean;
+  botUsername: string | null;
+  botFirstName?: string;
+  instructionsUrl: string;
+  message: string;
+  enabled?: boolean;
 }
 
-// Sync bot and admin user records via Admin Auth SDK as safe bootstrap step
-async function syncBotUser() {
-  try {
-    const adminAuth = getAuth();
+export default function TelegramBotConfig({ lang }: TelegramBotConfigProps) {
+  const [botInfo, setBotInfo] = useState<BotInfo | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
+  const [isToggling, setIsToggling] = useState(false);
+
+  // Target Chat ID state fields
+  const [forwardChatIdInput, setForwardChatIdInput] = useState('');
+  const [isSavingChatId, setIsSavingChatId] = useState(false);
+  const [saveChatIdSuccess, setSaveChatIdSuccess] = useState(false);
+  const [saveChatIdError, setSaveChatIdError] = useState<string | null>(null);
+
+  // VPS Webhook manual registration fields
+  const [customUrl, setCustomUrl] = useState('https://lxvoip.kirim-cepat.xyz');
+  const [isSettingWebhook, setIsSettingWebhook] = useState(false);
+  const [webhookResult, setWebhookResult] = useState<any>(null);
+  const [webhookError, setWebhookError] = useState<string | null>(null);
+
+  const fetchBotInfo = async () => {
+    setIsLoading(true);
     try {
-      const user = await adminAuth.getUserByEmail("telegram-bot-service@lxvoip.com");
-      console.log("[Firebase Admin Auth] Existing bot user found, updating password to ensure sync...");
-      await adminAuth.updateUser(user.uid, {
-        password: "botpassword123"
-      });
-      console.log("[Firebase Admin Auth] Bot user password synchronized successfully");
-    } catch (getErr: any) {
-      if (getErr.code === "auth/user-not-found") {
-        console.log("[Firebase Admin Auth] Bot user not found, creating new one...");
-        await adminAuth.createUser({
-          email: "telegram-bot-service@lxvoip.com",
-          password: "botpassword123",
-          emailVerified: true
-        });
-        console.log("[Firebase Admin Auth] Bot user created successfully via Admin SDK");
-      } else {
-        throw getErr;
-      }
-    }
-  } catch (err: any) {
-    console.warn("[Firebase Admin Auth] Could not sync bot user with Admin SDK (this is normal if API/IAM credentials are restricted):", err.message || err);
-  }
-
-  try {
-    const adminAuth = getAuth();
-    try {
-      const user = await adminAuth.getUserByEmail("admin@admin.com");
-      console.log("[Firebase Admin Auth] Existing admin fallback user found, updating password to ensure sync...");
-      await adminAuth.updateUser(user.uid, {
-        password: "admin123"
-      });
-      console.log("[Firebase Admin Auth] Admin fallback user password synchronized successfully");
-    } catch (getErr: any) {
-      if (getErr.code === "auth/user-not-found") {
-        console.log("[Firebase Admin Auth] Admin fallback user not found, creating new one...");
-        await adminAuth.createUser({
-          email: "admin@admin.com",
-          password: "admin123",
-          emailVerified: true
-        });
-        console.log("[Firebase Admin Auth] Admin fallback user created successfully via Admin SDK");
-      } else {
-        throw getErr;
-      }
-    }
-  } catch (err: any) {
-    console.warn("[Firebase Admin Auth] Could not sync admin fallback user with Admin SDK:", err.message || err);
-  }
-}
-
-// Fire off the sync in background
-syncBotUser();
-
-let authPromise: Promise<any> | null = null;
-
-// Ensure client SDK is authenticated to perform storage uploads
-async function getClientAuth() {
-  if (auth.currentUser) {
-    return auth.currentUser;
-  }
-  if (authPromise) {
-    return authPromise;
-  }
-
-  authPromise = (async () => {
-    try {
-      const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
-      console.log("[Firebase Client Auth] Authenticated telegram-bot-service successfully");
-      return userCred.user;
-    } catch (err: any) {
-      if (err.code === "auth/user-not-found" || err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
-        try {
-          const userCred = await createUserWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
-          console.log("[Firebase Client Auth] Created and authenticated telegram-bot-service");
-          return userCred.user;
-        } catch (createErr: any) {
-          console.warn("[Firebase Client Auth] Failed to create telegram-bot-service account:", createErr.message || createErr);
-          try {
-            const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
-            return userCred.user;
-          } catch (retryErr: any) {
-            console.warn("[Firebase Client Auth] Bot service retry signin failed:", retryErr.message || retryErr);
-          }
-        }
-      } else {
-        console.warn("[Firebase Client Auth] Tried to authenticate but got error:", err.message || err);
-      }
-    }
-
-    // Fallback to demo admin account
-    try {
-      const userCred = await signInWithEmailAndPassword(auth, "admin@admin.com", "admin123");
-      console.log("[Firebase Client Auth] Authenticated as admin fallback successfully");
-      return userCred.user;
-    } catch (adminErr: any) {
-      if (adminErr.code === "auth/user-not-found" || adminErr.code === "auth/invalid-credential" || adminErr.code === "auth/wrong-password") {
-        try {
-          const userCred = await createUserWithEmailAndPassword(auth, "admin@admin.com", "admin123");
-          console.log("[Firebase Client Auth] Created and authenticated demo admin account");
-          return userCred.user;
-        } catch (createAdminErr: any) {
-          console.warn("[Firebase Client Auth] Admin fallback create failed:", createAdminErr.message || createAdminErr);
-        }
-      } else {
-        console.warn("[Firebase Client Auth] Failed to log in as admin fallback:", adminErr.message || adminErr);
-      }
-    }
-
-    return null;
-  })();
-
-  try {
-    const user = await authPromise;
-    return user;
-  } finally {
-    authPromise = null;
-  }
-}
-
-const app = express();
-const PORT = 3000;
-
-app.use(express.json());
-
-// Ensure the local uploads directory exists and is statically served as backup
-const uploadsDir = path.join(process.cwd(), "uploads");
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
-app.use("/uploads", express.static(uploadsDir));
-
-// API route to let the frontend know the Telegram Bot status
-app.get("/api/telegram-info", async (req, res) => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
-    return res.json({
-      active: false,
-      botUsername: null,
-      instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-      message: "Telegram Bot is currently disabled.",
-      enabled: false
-    });
-  }
-
-  // Get current state from Firestore
-  let enabled = true;
-  let forwardChatId = "";
-  try {
-    await getClientAuth();
-    const docSnap = await getDoc(doc(db, "settings", "telegram"));
-    if (docSnap.exists()) {
-      const data = docSnap.data();
-      if (data) {
-        if (typeof data.enabled === "boolean") {
-          enabled = data.enabled;
-        }
-        if (typeof data.forwardChatId === "string") {
-          forwardChatId = data.forwardChatId;
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("Error reading telegram state from database, defaulting to true:", err);
-  }
-
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/getMe`);
-    const data = await response.json() as any;
-    if (data.ok && data.result) {
-      return res.json({
-        active: true,
-        botUsername: data.result.username,
-        botFirstName: data.result.first_name,
-        instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-        message: "Telegram Bot is active.",
-        enabled: enabled,
-        forwardChatId: forwardChatId
-      });
-    }
-  } catch (err) {
-    console.error("Error fetching bot info from Telegram:", err);
-  }
-
-  res.json({
-    active: true,
-    botUsername: "Bot",
-    instructionsUrl: process.env.APP_URL || "http://localhost:3000",
-    message: "Telegram Bot is active.",
-    enabled: enabled,
-    forwardChatId: forwardChatId
-  });
-});
-
-// Endpoint to turn on/off the Telegram Bot webhook 24/7
-app.post("/api/telegram-toggle", async (req, res) => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
-    return res.status(400).json({ ok: false, error: "Telegram Bot is not configured." });
-  }
-
-  const { enabled } = req.body;
-  if (typeof enabled !== "boolean") {
-    return res.status(400).json({ ok: false, error: "Invalid parameters" });
-  }
-
-  try {
-    // 1. Update Firestore settings using Client SDK
-    await getClientAuth();
-    await setDoc(doc(db, "settings", "telegram"), { enabled }, { merge: true });
-
-    // 2. Based on state, set or delete webhook
-    const appUrl = process.env.APP_URL;
-    let successMsg = enabled ? "Bot has been activated 24/7." : "Bot has been deactivated.";
-    let telegramResult = null;
-
-    if (enabled) {
-      if (appUrl) {
-        const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-        const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
-        telegramResult = await response.json() as any;
-        console.log("[Telegram Switch ON] Webhook registration response:", telegramResult);
-      }
-    } else {
-      const response = await fetch(`https://api.telegram.org/bot${token}/deleteWebhook`);
-      telegramResult = await response.json() as any;
-      console.log("[Telegram Switch OFF] Webhook deleted response:", telegramResult);
-    }
-
-    return res.json({ ok: true, enabled, message: successMsg, telegramResult });
-  } catch (err: any) {
-    console.error("Error toggling telegram bot:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Failed to toggle bot state" });
-  }
-});
-
-// Endpoint to update target Group/Channel/Chat ID from Admin Panel
-app.post("/api/telegram-save-config", async (req, res) => {
-  const { forwardChatId } = req.body;
-  if (typeof forwardChatId !== "string") {
-    return res.status(400).json({ ok: false, error: "Parameter forwardChatId wajib berupa string." });
-  }
-
-  try {
-    await getClientAuth();
-    await setDoc(doc(db, "settings", "telegram"), { forwardChatId: forwardChatId.trim() }, { merge: true });
-    return res.json({ ok: true, message: "Target Chat ID berhasil diperbarui." });
-  } catch (err: any) {
-    console.error("Error saving telegram forwardChatId config:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Gagal menyimpan konfigurasi Chat ID." });
-  }
-});
-
-// Endpoint to forward building data record on demand to configured Telegram chat
-app.post("/api/telegram-forward", async (req, res) => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
-    return res.status(400).json({ ok: false, error: "Token Telegram belum dikonfigurasi di server." });
-  }
-
-  const { buildingId } = req.body;
-  if (!buildingId) {
-    return res.status(400).json({ ok: false, error: "Parameter buildingId tidak boleh kosong." });
-  }
-
-  try {
-    // 1. Fetch Integration Settings
-    await getClientAuth();
-    const settingsSnap = await getDoc(doc(db, "settings", "telegram"));
-    const settings = settingsSnap.exists() ? settingsSnap.data() : null;
-
-    if (!settings || settings?.enabled === false) {
-      return res.status(400).json({ ok: false, error: "Integrasi Bot Telegram belum diaktifkan di setelan." });
-    }
-
-    const forwardChatId = settings?.forwardChatId;
-    if (!forwardChatId || forwardChatId.trim() === "") {
-      return res.status(400).json({ ok: false, error: "Target Chat ID Telegram belum diatur. Silakan atur di bagian Setelan Bot Telegram terlebih dahulu." });
-    }
-
-    // 2. Fetch the corresponding site building record
-    const buildingSnap = await getDoc(doc(db, "buildings", buildingId));
-    if (!buildingSnap.exists()) {
-      return res.status(404).json({ ok: false, error: "Rekaman situs tidak ditemukan." });
-    }
-
-    const building = buildingSnap.data() as any;
-
-    // 3. Format message in Indonesian and Chinese
-    let categoryLabel = building.category || "";
-    if (categoryLabel === "survey") categoryLabel = "踩点 / SURVEY";
-    else if (categoryLabel === "line") categoryLabel = "排线 / LINE";
-    else if (categoryLabel === "installation") categoryLabel = "安装 / INSTALLATION";
-    else categoryLabel = categoryLabel.toUpperCase();
-
-    let techSpecs = "";
-    if (building.category === "survey") {
-      techSpecs = `• 长途线路数量 (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• 本地线路数量 (Local Lines): *${building.localLines || 0}* 根`;
-    } else if (building.category === "line") {
-      techSpecs = `• 长途电话数量 (Long Distance Phones): *${building.longDistancePhones || 0}* 台\n• 本地电话数量 (Local Phones): *${building.localPhones || 0}* 台`;
-    } else if (building.category === "installation") {
-      techSpecs = `• Jalur Jauh (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• Jalur Lokal (Local Lines): *${building.localLines || 0}* 根\n• 总时长 (Total Duration): *${building.totalDuration || 0}* 小时`;
-    }
-
-    const descText = building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。";
-
-    const textPayload = `🏢 *${building.name || "Situs Tanpa Nama"}*
-
-📌 *Kategori / 类别*: [${categoryLabel}]
-👤 *Operator / 操作人*: ${building.operator || "N/A"}
-⏰ *Waktu / 操作时间*: ${building.operationTime || "N/A"}
-📍 *Lokasi / 地点*: ${building.location || "N/A"}
-
-🔌 *Spesifikasi Metrik Teknis / 技术指标*:
-${techSpecs}
-
-📝 *Keterangan Lapangan / 描述*:
-${descText}
-
-📋 _Dikirim langsung dari LXVOIP Web Admin Portal_`;
-
-    // 4. Send with Photo if gallery contains any image URLs
-    let photoUrl = "";
-    if (building.gallery && building.gallery.length > 0) {
-      const firstMedia = building.gallery[0];
-      photoUrl = typeof firstMedia === "string" ? firstMedia : (firstMedia?.url || "");
-    }
-
-    if (photoUrl && photoUrl.startsWith("http")) {
-      await sendTelegramPhoto(forwardChatId, photoUrl, textPayload, token);
-    } else {
-      await sendTelegramMessage(forwardChatId, textPayload, token);
-    }
-
-    return res.json({ ok: true, message: "Berhasil dteruskan ke Telegram!", targetChatId: forwardChatId });
-  } catch (err: any) {
-    console.error("Failed to forward building to telegram:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Gagal mengirimkan data ke Telegram." });
-  }
-});
-
-// Telegram Bot Webhook Receiver
-app.post("/api/telegram-webhook", async (req, res) => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    return res.status(400).send("Telegram token not configured.");
-  }
-  
-  try {
-    const update = req.body;
-    if (update) {
-      await handleTelegramUpdate(update, token);
-    }
-    res.status(200).send("OK");
-  } catch (err) {
-    console.error("Error handling telegram update:", err);
-    res.status(500).send("Internal Error");
-  }
-});
-
-// Manual setup of Telegram Bot Webhook
-app.post("/api/manual-webhook-setup", async (req, res) => {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
-    return res.status(400).json({ ok: false, error: "Telegram Bot Token is not configured on the server." });
-  }
-
-  const { customUrl } = req.body;
-  if (!customUrl || typeof customUrl !== "string" || !customUrl.startsWith("https://")) {
-    return res.status(400).json({ ok: false, error: "Custom webhook URL must start with https://" });
-  }
-
-  const webhookUrl = `${customUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-  console.log(`[Manual Setup] Attempting to register webhook to: ${webhookUrl}`);
-
-  try {
-    const response = await fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`);
-    const data = await response.json() as any;
-    
-    if (data && data.ok === false) {
-      return res.status(400).json({ 
-        ok: false, 
-        error: `Telegram API: ${data.description || "Unauthorized/Invalid Bot Token"} (Error Code: ${data.error_code || 401})` 
-      });
-    }
-
-    return res.json({ ok: true, data });
-  } catch (err: any) {
-    console.error("[Manual Setup] Failed to register webhook via API call:", err);
-    return res.status(500).json({ ok: false, error: err.message || "Failed to set webhook" });
-  }
-});
-
-// Proxy endpoint for Gaode Map (Amap) Input Tips (Autocomplete) and forward geocoding
-app.get("/api/amap/search", async (req, res) => {
-  const queryVal = String(req.query.q || "").trim();
-  if (!queryVal) {
-    return res.json({ status: "ok", results: [] });
-  }
-
-  const key = process.env.AMAP_KEY;
-  if (key) {
-    try {
-      // Fetch autocomplete inputtips
-      const inputtipsUrl = `https://restapi.amap.com/v3/assistant/inputtips?keywords=${encodeURIComponent(queryVal)}&key=${key}`;
-      const response = await fetch(inputtipsUrl);
-      if (response.ok) {
-        const data = await response.json() as any;
-        if (data.status === "1" && Array.isArray(data.tips)) {
-          // Format Amap inputtips
-          const results = data.tips
-            .filter((tip: any) => tip.location && typeof tip.location === "string" && tip.location.includes(","))
-            .map((tip: any) => {
-              const [lngStr, latStr] = tip.location.split(",");
-              const lat = parseFloat(latStr);
-              const lng = parseFloat(lngStr);
-              
-              // Parse out state, city, county when possible from district field (e.g. "广东省深圳市南山区")
-              const distStr = tip.district || "";
-              let provinceAttr = "";
-              let cityAttr = "";
-              let districtAttr = "";
-              
-              if (typeof distStr === "string") {
-                const provMatch = distStr.match(/^[^省]+省/);
-                provinceAttr = provMatch ? provMatch[0] : "";
-                
-                const cityMatch = distStr.match(/(?:省|自治区)([^市]+市)/);
-                cityAttr = cityMatch ? cityMatch[1] : (distStr.includes("市") ? distStr.split("市")[0] + "市" : "");
-                
-                const leftover = distStr.replace(provinceAttr, "").replace(cityAttr, "");
-                districtAttr = leftover || "";
-              }
-
-              return {
-                type: "online",
-                name: tip.name,
-                description: `${distStr}${typeof tip.address === "string" ? tip.address : ""}`,
-                latlng: [lat, lng],
-                addressDetails: {
-                  province: provinceAttr,
-                  city: cityAttr,
-                  district: districtAttr
-                }
-              };
-            });
-
-          if (results.length > 0) {
-            return res.json({ source: "amap", results });
-          }
-        }
+      const response = await fetch('/api/telegram-info');
+      const data = await response.json();
+      setBotInfo(data);
+      if (data && data.forwardChatId) {
+        setForwardChatIdInput(data.forwardChatId);
       }
     } catch (err) {
-      console.warn("Amap inputtips lookup failed, falling back to Nominatim:", err);
+      console.error('Failed to fetch telegram bot info:', err);
+    } finally {
+      setIsLoading(false);
     }
-  }
-
-  // Fallback to OpenStreetMap/Nominatim if AMAP_KEY is empty or fails
-  try {
-    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(queryVal)}&addressdetails=1&limit=10&countrycodes=cn&accept-language=zh-CN,zh,en`;
-    const response = await fetch(url, { headers: { "User-Agent": "LXVOIP-Database-Client" } });
-    if (response.ok) {
-      const data = await response.json() as any[];
-      const results = data.map((item: any) => {
-        const shortName = item.name || item.display_name.split(",")[0] || queryVal;
-        const addr = item.address || {};
-        const province = addr.state || addr.province || addr.region || "";
-        const city = addr.city || addr.town || addr.municipality || "";
-        const district = addr.county || addr.district || addr.suburb || "";
-        return {
-          type: "online",
-          name: shortName,
-          description: item.display_name,
-          latlng: [parseFloat(item.lat), parseFloat(item.lon)],
-          addressDetails: {
-            province,
-            city,
-            district
-          }
-        };
-      });
-      return res.json({ source: "nominatim", results });
-    }
-  } catch (err) {
-    console.error("Nominatim search failed:", err);
-  }
-
-  return res.json({ source: "none", results: [] });
-});
-
-// Proxy endpoint for Gaode Map (Amap) Reverse Geocoding (Regeo)
-app.get("/api/amap/regeo", async (req, res) => {
-  const lat = parseFloat(String(req.query.lat || ""));
-  const lng = parseFloat(String(req.query.lng || ""));
-
-  if (isNaN(lat) || isNaN(lng)) {
-    return res.status(400).json({ error: "Invalid Coordinates" });
-  }
-
-  const key = process.env.AMAP_KEY;
-  if (key) {
-    try {
-      const regeoUrl = `https://restapi.amap.com/v3/geocode/regeo?location=${lng},${lat}&key=${key}`;
-      const response = await fetch(regeoUrl);
-      if (response.ok) {
-        const data = await response.json() as any;
-        if (data.status === "1" && data.regeocode) {
-          const comp = data.regeocode.addressComponent || {};
-          let province = String(comp.province || "");
-          let city = typeof comp.city === "string" ? String(comp.city) : "";
-          if (!city && Array.isArray(comp.city)) {
-            city = "";
-          }
-          const district = typeof comp.district === "string" ? String(comp.district) : "";
-          
-          return res.json({
-            source: "amap",
-            province,
-            city,
-            district,
-            formatted_address: data.regeocode.formatted_address || ""
-          });
-        }
-      }
-    } catch (err) {
-      console.warn("Amap reverse geocoding failed, falling back to Nominatim:", err);
-    }
-  }
-
-  // Fallback to OSM / Nominatim
-  try {
-    const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`;
-    const response = await fetch(url, { headers: { "User-Agent": "LXVOIP-Database-Client", "Accept-Language": "zh-CN,zh,en" } });
-    if (response.ok) {
-      const data = await response.json() as any;
-      const addr = data.address || {};
-      const province = addr.state || addr.region || addr.province || '';
-      const city = addr.city || addr.municipality || addr.city_district || addr.county || '';
-      const district = addr.suburb || addr.neighbourhood || addr.village || addr.quarter || '';
-      return res.json({
-        source: "nominatim",
-        province: province.replace(/Province|Kepulauan|Daerah Istimewa/gi, '').trim(),
-        city: city.replace(/City|Kota|Kabupaten/gi, '').trim(),
-        district: district.trim(),
-        formatted_address: data.display_name || ""
-      });
-    }
-  } catch (err) {
-    console.error("Nominatim regeo failed:", err);
-  }
-
-  return res.json({ source: "none", province: "", city: "", district: "", formatted_address: "" });
-});
-
-const authenticatedSessions: Record<string, any> = {};
-
-async function getTelegramSession(chatId: string | number): Promise<any> {
-  const cidStr = String(chatId);
-  if (authenticatedSessions[cidStr]) {
-    return authenticatedSessions[cidStr];
-  }
-  try {
-    const docRef = doc(db, "telegram_sessions", cidStr);
-    const docSnap = await getDoc(docRef);
-    if (docSnap.exists()) {
-      const data = docSnap.data();
-      authenticatedSessions[cidStr] = data;
-      return data;
-    }
-  } catch (err) {
-    console.error("Failed to fetch telegram session from firestore:", err);
-  }
-  return null;
-}
-
-const messages = {
-  id: {
-    mediaGroupStart: "⚡️ *Grup media diterima! Sedang mengumpulkan semua foto & video dari album...*",
-    mediaGroupProcessing: "🤖 *Berhasil mengumpulkan {count} media dari album. Mengunggah berkas ke cloud...*",
-    mediaGroupFail: "❌ Gagal mengunggah satupun berkas media dari album Anda.",
-    mediaGroupAnalysis: "🤖 *Mengunduh & memproses media selesai. Menganalisis caption data lapangan dengan AI Gemini...*",
-    mediaGroupSuccessHeader: "✅ *DATA LAPANGAN ALBUM BERHASIL DISINKRONKAN!*",
-    singleMediaReceived: "⚡️ *Berkas lapangan diterima! Sedang mengunggah ke server cloud...*",
-    singleMediaAnalysis: "🤖 *Media sukses disimpan di Cloud. Menganalisis caption data lapangan dengan AI Gemini...*",
-    singleMediaSuccessHeader: "✅ *DATA LAPANGAN BERHASIL DISINKRONKAN!*",
-    authRequired: "⚠️ Silakan isi email atau telepon Anda yang terdaftar.\nFormat: `/auth [email_atau_telepon]`",
-    authSearching: "🔍 Menyelidiki database Surveyor untuk \"{input}\"...",
-    authNotFound: "❌ Akun \"{input}\" tidak terdaftar di sistem. Harap hubungi administrator pusat untuk mendaftarkan akun Surveyor Anda terlebih dahulu.",
-    authDbError: "⚠️ Terjadi kesalahan internal database saat mendaftarkan sesi. Hubungi teknisi kami. Detail Error: {err}",
-    fallbackGuidance: "💡 *Butuh bantuan?* Harap kirimkan foto atau video lapangan yang ingin didokumentasikan, sertakan informasi penting pada bagian caption/keterangan gambar!",
-    syncFailed: "⚠️ Gagal sinkronisasi data lapangan: {err}. Harap coba kembali.",
-    labelName: "Nama",
-    labelCategory: "Kategori",
-    labelOperator: "Operator",
-    labelPosisi: "Posisi",
-    labelWilayah: "Wilayah",
-    labelDeskripsi: "Deskripsi",
-    labelMediaCount: "Jumlah Media",
-    mediaSavedCount: "berkas berhasil disimpan di galeri",
-    portalLinkText: "Buka platform utama untuk melihat langsung"
-  },
-  zh: {
-    mediaGroupStart: "⚡️ *群组媒体已收到！正在从相册收集所有照片与视频...*",
-    mediaGroupProcessing: "🤖 *成功收集相册中的 {count} 个媒体。正在上传文件到云端...*",
-    mediaGroupFail: "❌ 无法上传您相册中的任何媒体文件。",
-    mediaGroupAnalysis: "🤖 *下载并处理媒体已完成。正在使用 Gemini AI 分析现场说明数据...*",
-    mediaGroupSuccessHeader: "✅ *相册现场数据同步成功！*",
-    singleMediaReceived: "⚡️ *现场文件已收到！正在上传至云端服务器...*",
-    singleMediaAnalysis: "🤖 *媒体成功保存到云端。正在使用 Gemini AI 分析现场说明数据...*",
-    singleMediaSuccessHeader: "✅ *现场数据同步成功！*",
-    authRequired: "⚠️ 请填写您已注册的邮箱或电话。\n格式: `/auth [邮箱_或_电话]`",
-    authSearching: "🔍 正在数据库中查询测量员 \"{input}\"...",
-    authNotFound: "❌ 账户 \"{input}\" 未在系统中注册。请先联系中心管理员注册您的测量员账户。",
-    authDbError: "⚠️ 注册会话时发生内部数据库错误。请联系我们的技术人员。错误详情: {err}",
-    fallbackGuidance: "💡 *需要帮助吗？* 请发送您要归档的现场照片或视频，并在说明（caption）中附上重要信息！",
-    syncFailed: "⚠️ 同步现场数据失败: {err}。请重试。",
-    labelName: "名称",
-    labelCategory: "类别",
-    labelOperator: "操作员",
-    labelPosisi: "位置",
-    labelWilayah: "区域",
-    labelDeskripsi: "描述",
-    labelMediaCount: "媒体数量",
-    mediaSavedCount: "个文件成功保存到图库",
-    portalLinkText: "打开主平台直接查看"
-  }
-};
-
-// Media item details for media groups
-interface PendingMediaItem {
-  fileId: string;
-  fileName: string;
-  mimeType: string;
-  isPhoto: boolean;
-}
-
-interface PendingMediaGroup {
-  chatId: string | number;
-  username: string;
-  captions: string[];
-  texts: string[];
-  mediaList: PendingMediaItem[];
-  timer: NodeJS.Timeout | null;
-  receivedAt: number;
-}
-
-const pendingMediaGroups: Record<string, PendingMediaGroup> = {};
-
-// Helper to download a file from Telegram and upload it to Firebase Storage (with local fallback)
-async function uploadSingleTelegramFile(fileId: string, fileName: string, mimeType: string, token: string): Promise<string> {
-  const targetFilePath = await getTelegramFilePath(fileId, token);
-  if (!targetFilePath) {
-    throw new Error("Gagal mengambil path berkas dari server Telegram.");
-  }
-
-  const fileBuffer = await downloadTelegramFile(targetFilePath, token);
-  if (!fileBuffer || fileBuffer.length === 0) {
-    throw new Error("Gagal memproses data unduhan media.");
-  }
-
-  let mediaUrl = "";
-  try {
-    // Ensure we have an authenticated Firebase session so Storage security rules authorize the upload
-    await getClientAuth();
-
-    // Store in Firebase Storage using the Client SDK
-    const userUid = auth.currentUser?.uid || "telegram";
-    const storageRef = ref(storage, `buildings/${userUid}/${fileName}`);
-    const uploadBytesResult = await uploadBytes(storageRef, new Uint8Array(fileBuffer), { contentType: mimeType });
-    mediaUrl = await getDownloadURL(uploadBytesResult.ref);
-    console.log("[Media Upload Helper] Uploaded successfully to Firebase Storage:", mediaUrl);
-  } catch (storageErr: any) {
-    console.warn("[Media Upload Helper] Firebase Storage upload failed/unauthorized, falling back to local server storage:", storageErr.message || storageErr);
-    
-    // Save file locally on the container as robust fallback
-    const localPath = path.join(process.cwd(), "uploads", fileName);
-    fs.writeFileSync(localPath, Buffer.from(fileBuffer));
-    
-    const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
-    mediaUrl = appUrl ? `${appUrl}/uploads/${fileName}` : `/uploads/${fileName}`;
-    console.log("[Media Upload Helper] Stored and accessible locally:", mediaUrl);
-  }
-
-  return mediaUrl;
-}
-
-// Processor for group/album messages sent as a media group
-async function processMediaGroup(group: PendingMediaGroup, token: string) {
-  const chatId = group.chatId;
-  const username = group.username;
-
-  try {
-    // Determine language from session
-    const dbSession = await getTelegramSession(chatId);
-    const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
-    const msg = messages[lang];
-
-    await sendTelegramMessage(chatId, msg.mediaGroupProcessing.replace("{count}", String(group.mediaList.length)), token);
-
-    // Upload all files in parallel
-    const uploadPromises = group.mediaList.map(async (media) => {
-      try {
-        const url = await uploadSingleTelegramFile(media.fileId, media.fileName, media.mimeType, token);
-        return url;
-      } catch (err: any) {
-        console.warn(`[Process Media Group] Failed to upload a file: ${media.fileName}. Error:`, err.message || err);
-        return null;
-      }
-    });
-
-    const results = await Promise.all(uploadPromises);
-    const mediaUrls = results.filter((url): url is string => url !== null);
-
-    if (mediaUrls.length === 0) {
-      await sendTelegramMessage(chatId, msg.mediaGroupFail, token);
-      return;
-    }
-
-    await sendTelegramMessage(chatId, msg.mediaGroupAnalysis, token);
-
-    const activeSession = dbSession || {
-      name: username,
-      email: "",
-      phone: "",
-      role: "unverified_telegram",
-      userUid: "telegram_" + chatId,
-      lang: "id"
-    };
-
-    // Combine all unique captions & text
-    const uniqueCaptions = Array.from(new Set(group.captions.map(c => c.trim()).filter(Boolean)));
-    const uniqueTexts = Array.from(new Set(group.texts.map(t => t.trim()).filter(Boolean)));
-    const combinedCaption = uniqueCaptions.join("\n") || uniqueTexts.join("\n") || `Site baru oleh ${activeSession.name}`;
-
-    const parsedRecord = await extractStructuredRecordWithGemini(combinedCaption, activeSession.name);
-
-    // Set the complete group's gallery list
-    parsedRecord.gallery = mediaUrls;
-
-    // Save record in Firestore
-    const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const buildingRef = doc(db, "buildings", finalRecordId);
-    await setDoc(buildingRef, {
-      ...parsedRecord,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp(),
-      createdBy: activeSession.userUid || "telegram_" + chatId
-    });
-
-    const portalUrl = process.env.APP_URL || "https://ai.studio/build";
-
-    const confirmationMsg = `${msg.mediaGroupSuccessHeader}
-----------------------------------------
-📌 *${msg.labelName}:* ${parsedRecord.name}
-📂 *${msg.labelCategory}:* ${parsedRecord.category.toUpperCase()}
-👤 *${msg.labelOperator}:* ${parsedRecord.operator}
-📍 *${msg.labelPosisi}:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
-🗺️ *${msg.labelWilayah}:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
-📝 *${msg.labelDeskripsi}:* ${parsedRecord.description}
-🖼️ *${msg.labelMediaCount}:* ${mediaUrls.length} ${msg.mediaSavedCount}!
-
-🔗 *${msg.portalLinkText}:*
-👉 ${portalUrl}`;
-
-    await sendTelegramMessage(chatId, confirmationMsg, token);
-  } catch (err: any) {
-    console.error("Failed to process Telegram media group upload:", err);
-    try {
-      const dbSession = await getTelegramSession(chatId);
-      const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
-      const msg = messages[lang];
-      await sendTelegramMessage(chatId, msg.syncFailed.replace("{err}", err.message || err), token);
-    } catch (innerErr) {
-      await sendTelegramMessage(chatId, `⚠️ Gagal sinkronisasi: ${err.message || err}`, token);
-    }
-  }
-}
-
-// Telegram message processor core (Active)
-async function handleTelegramUpdate(update: any, token: string) {
-  const message = update.message || update.edited_message;
-  if (!message || !message.chat) {
-    return;
-  }
-
-  const chatId = message.chat.id;
-  const text = message.text || "";
-  const caption = message.caption || "";
-  const username = (message.from && (message.from.username || message.from.first_name)) || "User";
-
-  // Load language settings for this session
-  const dbSession = await getTelegramSession(chatId);
-  const lang: 'id' | 'zh' = (dbSession && dbSession.lang === "zh") ? "zh" : "id";
-  const msg = messages[lang];
-
-  // Language Selection Actions (triggered from keyboard buttons or manually)
-  if (text === "🇮🇩 Bahasa Indonesia" || text === "/lang_id") {
-    const sessionRef = doc(db, "telegram_sessions", String(chatId));
-    await setDoc(sessionRef, { lang: "id" }, { merge: true });
-    
-    // Update local memory cache helper
-    if (authenticatedSessions[String(chatId)]) {
-      authenticatedSessions[String(chatId)].lang = "id";
-    } else {
-      authenticatedSessions[String(chatId)] = { lang: "id" };
-    }
-
-    const welcomeText = `Selamat datang di Bot LXVOIP Database !!
-
-Cara penggunaan
-Ketik
-
-1. /auth [email]
-2. upload/forward foto beserta captionya seperti contoh`;
-
-    const guidePhotoUrl = "https://i.postimg.cc/52c42fvc/8F42ED6D-13EE-473A-ADC6-D2FEC07B29DB.png";
-    await sendTelegramPhoto(chatId, guidePhotoUrl, welcomeText, token, { remove_keyboard: true });
-    return;
-  }
-
-  if (text === "🇨🇳 中文" || text === "/lang_zh") {
-    const sessionRef = doc(db, "telegram_sessions", String(chatId));
-    await setDoc(sessionRef, { lang: "zh" }, { merge: true });
-    
-    // Update local memory cache helper
-    if (authenticatedSessions[String(chatId)]) {
-      authenticatedSessions[String(chatId)].lang = "zh";
-    } else {
-      authenticatedSessions[String(chatId)] = { lang: "zh" };
-    }
-
-    const welcomeText = `欢迎使用 LXVOIP 数据库机器人 !!
-
-使用方法
-输入
-
-1. /auth [邮箱]
-2. 像示例一样上传/转发照片及其说明（caption）`;
-
-    const guidePhotoUrl = "https://i.postimg.cc/52c42fvc/8F42ED6D-13EE-473A-ADC6-D2FEC07B29DB.png";
-    await sendTelegramPhoto(chatId, guidePhotoUrl, welcomeText, token, { remove_keyboard: true });
-    return;
-  }
-
-  // 1. Handshake commands
-  if (text.startsWith("/start") || text.startsWith("/help") || text.startsWith("/lang")) {
-    const replyKeyboard = {
-      keyboard: [
-        [ { text: "🇮🇩 Bahasa Indonesia" }, { text: "🇨🇳 中文" } ]
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: true
-    };
-    await sendTelegramMessage(chatId, "Pilihlah bahasa Anda / 请选择您的语言:", token, replyKeyboard);
-    return;
-  }
-
-  // 2. Authentication flow
-  if (text.startsWith("/auth")) {
-    const parts = text.split(/\s+/);
-    if (parts.length < 2) {
-      await sendTelegramMessage(chatId, msg.authRequired, token);
-      return;
-    }
-    const input = parts[1].trim().toLowerCase();
-    
-    await sendTelegramMessage(chatId, msg.authSearching.replace("{input}", input), token);
-    
-    let matchedSurveyor: any = null;
-    let matchedSurveyorId = "";
-    let categoryFound: 'surveyor' | 'admin' = 'surveyor';
-
-    try {
-      // Look up in surveyors using standard query and getDocs from Client SDK
-      const qEmail = query(collection(db, "surveyors"), where("email", "==", input));
-      const snapSurveyorEmail = await getDocs(qEmail);
-      if (!snapSurveyorEmail.empty) {
-        matchedSurveyor = snapSurveyorEmail.docs[0].data();
-        matchedSurveyorId = snapSurveyorEmail.docs[0].id;
-      } else {
-        const qPhone = query(collection(db, "surveyors"), where("phone", "==", input));
-        const snapSurveyorPhone = await getDocs(qPhone);
-        if (!snapSurveyorPhone.empty) {
-          matchedSurveyor = snapSurveyorPhone.docs[0].data();
-          matchedSurveyorId = snapSurveyorPhone.docs[0].id;
-        }
-      }
-
-      // If not found, look up in admins using standard query and getDocs from Client SDK
-      if (!matchedSurveyor) {
-        const qAdmin = query(collection(db, "admins"), where("email", "==", input));
-        const snapAdminEmail = await getDocs(qAdmin);
-        if (!snapAdminEmail.empty) {
-          matchedSurveyor = snapAdminEmail.docs[0].data();
-          matchedSurveyorId = snapAdminEmail.docs[0].id;
-          categoryFound = 'admin';
-        }
-      }
-
-      if (matchedSurveyor) {
-        const name = matchedSurveyor.name || "Staff";
-        // Save the Telegram mapping into firestore for persistence via Client SDK
-        const sessionRef = doc(db, "telegram_sessions", String(chatId));
-        await setDoc(sessionRef, {
-          chatId,
-          name,
-          email: matchedSurveyor.email || "",
-          phone: matchedSurveyor.phone || "",
-          role: categoryFound,
-          userUid: matchedSurveyorId,
-          linkedAt: serverTimestamp()
-        }, { merge: true });
-
-        // Update local memory cache
-        authenticatedSessions[String(chatId)] = {
-          name,
-          email: matchedSurveyor.email || "",
-          phone: matchedSurveyor.phone || "",
-          role: categoryFound,
-          userUid: matchedSurveyorId,
-          lang: lang
-        };
-
-        const successText = `🎉 *Autentikasi Berhasil! / 验证成功！*
-👤 *Nama / 姓名:* ${name}
-📂 *Role / 角色:* ${categoryFound.toUpperCase()}
-
-${lang === "zh" ? "现在，您发送给此机器人的每张照片或视频都将以您的名义记录为官方操作员！" : "Sekarang setiap foto atau video yang Anda kirimkan ke bot ini akan direkam atas nama Anda sebagai operator resmi!"}`;
-        await sendTelegramMessage(chatId, successText, token);
-      } else {
-        await sendTelegramMessage(chatId, msg.authNotFound.replace("{input}", input), token);
-      }
-    } catch (err: any) {
-      console.error("Auth query issue:", err);
-      await sendTelegramMessage(chatId, msg.authDbError.replace("{err}", err.message || err), token);
-    }
-    return;
-  }
-
-  // 3. Media Message upload flow
-  const isPhoto = message.photo && message.photo.length > 0;
-  const isVideo = message.video;
-  const mediaGroupId = message.media_group_id;
-
-  if (mediaGroupId && (isPhoto || isVideo)) {
-    // If it belongs to a media group/album, buffer it first
-    if (!pendingMediaGroups[mediaGroupId]) {
-      pendingMediaGroups[mediaGroupId] = {
-        chatId,
-        username,
-        captions: [],
-        texts: [],
-        mediaList: [],
-        timer: null,
-        receivedAt: Date.now()
-      };
-      
-      // Notify only once per group
-      await sendTelegramMessage(chatId, msg.mediaGroupStart, token);
-    }
-
-    const groupRef = pendingMediaGroups[mediaGroupId];
-
-    // Append media item
-    if (isPhoto) {
-      const photoObj = message.photo[message.photo.length - 1];
-      const fileId = photoObj.file_id;
-      const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 6)}.jpg`;
-      const mimeType = "image/jpeg";
-      groupRef.mediaList.push({ fileId, fileName, mimeType, isPhoto: true });
-    } else if (isVideo) {
-      const fileId = isVideo.file_id;
-      const fileName = `media_${Date.now()}_${Math.random().toString(36).substring(2, 6)}_${isVideo.file_name || "video.mp4"}`;
-      const mimeType = isVideo.mime_type || "video/mp4";
-      groupRef.mediaList.push({ fileId, fileName, mimeType, isPhoto: false });
-    }
-
-    if (caption) {
-      groupRef.captions.push(caption);
-    }
-    if (text) {
-      groupRef.texts.push(text);
-    }
-
-    // Reset debounce timer
-    if (groupRef.timer) {
-      clearTimeout(groupRef.timer);
-    }
-
-    groupRef.timer = setTimeout(() => {
-      const liveGroup = pendingMediaGroups[mediaGroupId];
-      if (liveGroup) {
-        delete pendingMediaGroups[mediaGroupId];
-        processMediaGroup(liveGroup, token).catch(e => {
-          console.error("Error in processMediaGroup promise:", e);
-        });
-      }
-    }, 2000);
-
-    return;
-  }
-
-  if (isPhoto || isVideo) {
-    // Acknowledge receipt
-    await sendTelegramMessage(chatId, msg.singleMediaReceived, token);
-
-    try {
-      let fileId = "";
-      let fileName = "";
-      let mimeType = "";
-
-      if (isPhoto) {
-        // Take the largest photo size available
-        const photoObj = message.photo[message.photo.length - 1];
-        fileId = photoObj.file_id;
-        fileName = `tg_photo_${Date.now()}.jpg`;
-        mimeType = "image/jpeg";
-      } else {
-        fileId = isVideo.file_id;
-        fileName = `tg_video_${Date.now()}_${isVideo.file_name || "video.mp4"}`;
-        mimeType = isVideo.mime_type || "video/mp4";
-      }
-
-      // Upload file cleanly using helper
-      const mediaUrl = await uploadSingleTelegramFile(fileId, fileName, mimeType, token);
-
-      await sendTelegramMessage(chatId, msg.singleMediaAnalysis, token);
-
-      // Verify Surveyor session identity
-      const activeSession = dbSession || {
-        name: username,
-        email: "",
-        phone: "",
-        role: "unverified_telegram",
-        userUid: "telegram_" + chatId,
-        lang: "id"
-      };
-
-      // Parse details with AI Gemini for high-fidelity smart extraction if available
-      const analysisText = caption.trim() || text.trim() || `Site baru oleh ${activeSession.name}`;
-      const parsedRecord = await extractStructuredRecordWithGemini(analysisText, activeSession.name);
-
-      // Set the uploaded gallery file
-      parsedRecord.gallery = [mediaUrl];
-
-      // Save record in Firestore via Client SDK to avoid telemetry & credential dependency issue
-      const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      const buildingRef = doc(db, "buildings", finalRecordId);
-      await setDoc(buildingRef, {
-        ...parsedRecord,
-        updatedAt: serverTimestamp(),
-        createdAt: serverTimestamp(),
-        createdBy: activeSession.userUid || "telegram_" + chatId
-      });
-
-      const portalUrl = process.env.APP_URL || "https://ai.studio/build";
-
-      const confirmationMsg = `${msg.singleMediaSuccessHeader}
-----------------------------------------
-📌 *${msg.labelName}:* ${parsedRecord.name}
-📂 *${msg.labelCategory}:* ${parsedRecord.category.toUpperCase()}
-👤 *${msg.labelOperator}:* ${parsedRecord.operator}
-📍 *${msg.labelPosisi}:* ${parsedRecord.latitude || "0.0"}, ${parsedRecord.longitude || "0.0"}
-🗺️ *${msg.labelWilayah}:* ${parsedRecord.province} - ${parsedRecord.city} - ${parsedRecord.district}
-📝 *${msg.labelDeskripsi}:* ${parsedRecord.description}
-
-🔗 *${msg.portalLinkText}:*
-👉 ${portalUrl}`;
-
-      await sendTelegramMessage(chatId, confirmationMsg, token);
-    } catch (err: any) {
-      console.error("Failed to compile Telegram upload:", err);
-      await sendTelegramMessage(chatId, msg.syncFailed.replace("{err}", err.message || err), token);
-    }
-    return;
-  }
-
-  // Fallback chat guidance for random unhandled text
-  if (text) {
-    await sendTelegramMessage(chatId, msg.fallbackGuidance, token);
-  }
-}
-
-// Telegram API Helper calls
-async function getTelegramFilePath(fileId: string, token: string): Promise<string | null> {
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/getFile?file_id=${fileId}`);
-    const data = await res.json() as any;
-    if (data.ok && data.result) {
-      return data.result.file_path;
-    }
-  } catch (err) {
-    console.error("Error fetching file path:", err);
-  }
-  return null;
-}
-
-async function downloadTelegramFile(filePath: string, token: string): Promise<Buffer | null> {
-  try {
-    const res = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`);
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (err) {
-    console.error("Error downloading file:", err);
-  }
-  return null;
-}
-
-async function sendTelegramMessage(chatId: string | number, text: string, token: string, replyMarkup?: any) {
-  try {
-    const payload: any = {
-      chat_id: chatId,
-      text: text,
-      parse_mode: "Markdown"
-    };
-    if (replyMarkup) {
-      payload.reply_markup = replyMarkup;
-    }
-    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-  } catch (err) {
-    console.error("Failed to send message to telegram:", err);
-  }
-}
-
-async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any) {
-  try {
-    const payload: any = {
-      chat_id: chatId,
-      photo: photoUrl,
-      caption: caption,
-      parse_mode: "Markdown"
-    };
-    if (replyMarkup) {
-      payload.reply_markup = replyMarkup;
-    }
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    if (!res.ok) {
-      const errText = await res.text();
-      console.warn("[Telegram sendPhoto Error, falling back to sendMessage]:", errText);
-      await sendTelegramMessage(chatId, caption, token, replyMarkup);
-    }
-  } catch (err) {
-    console.error("Failed to send photo to Telegram, falling back to text:", err);
-    await sendTelegramMessage(chatId, caption, token, replyMarkup);
-  }
-}
-
-// AI Gemini analysis call using @google/genai module
-async function extractStructuredRecordWithGemini(userCaption: string, activeUserName: string): Promise<any> {
-  const geminiKey = process.env.GEMINI_API_KEY;
-  if (!geminiKey) {
-    console.warn("GEMINI_API_KEY absent, calling fallback parser.");
-    return fallbackRegexParser(userCaption, activeUserName);
-  }
-
-  try {
-    const ai = new GoogleGenAI({
-      apiKey: geminiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build'
-        }
-      }
-    });
-
-    const systemInstruction = `You are an expert parsing module for the LXVOIP multi-dimensional data platform.
-Your objective is to analyze the user's caption of an engineering action, and output a valid JSON record complying with our database schema.
-Languages supported: Indonesian, Chinese (Mandarin), English. 
-
-The user caption often follows a specific multi-line layout:
-- Line 1: Location/Region short string, often Province + City + Index/Floor (e.g., "江西抚州6" or "山东济南开发区"). Translate or map this to standardized Chinese characters:
-  - Province (e.g., "江西" -> "江西省")
-  - City (e.g., "抚州" -> "抚州市")
-  - If there is a trailing number (e.g., "6" at the end of "江西抚州6"), interpret it as the 'installedLines' or floors, or use it when applicable.
-- Line 2: The Site / Building / Unit Name (e.g., "抚州市政务服务中心"). Use this exactly as the site 'name'.
-- Line 3 and beyond: The detailed notes, description, or instructions (e.g., "图1图2是大楼外面... 剩下楼层你们自己探索..."). This is the detailed 'description'.
-
-Alternatively, the user might specify with explicit labels e.g., "nama: [nama]", "provinsi: [provinsi]", etc. Handle both formats robustly.
-
-Fields to extract:
-1. name (Site Name or Site Title, default: "Situs Telegram" or "电报现场")
-2. category (must be exactly one of 'survey', 'line', or 'installation'. Default is 'survey')
-3. operator (name of the field engineer. If not mentioned in caption, use "${activeUserName}")
-4. province (Province in China, e.g., "江西省")
-5. city (City in China, e.g., "抚州市")
-6. district (District in China, e.g., "临川区" for Fuzhou or "月湖区" for Yingtan)
-7. latitude (decimal float coordinate. Use 27.9863 for Fuzhou, Jiangxi or 28.2435 for Yingtan, Jiangxi if not explicitly specified)
-8. longitude (decimal float coordinate. Use 116.3584 for Fuzhou, Jiangxi or 117.0351 for Yingtan, Jiangxi if not explicitly specified)
-9. description (notes/detailed information of what is shown/done)
-10. longDistanceLines (integer)
-11. localLines (integer)
-12. longDistancePhones (integer)
-13. localPhones (integer)
-14. installedLines (integer)
-15. totalDuration (number hours)
-
-Please translate/normalize the province/city/district inputs to accurate standard Chinese characters if you detect names like Shandong -> 山东省, Jiujiang -> 九江市, Yingtan -> 鹰潭市, Yuehu -> 月湖区, Fuzhou -> 抚州市.
-If Indonesian descriptions represent locations, parse them correctly.
-
-Return ONLY structured JSON conforming to the requested response schema.`;
-
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userCaption,
-      config: {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            name: { type: Type.STRING },
-            category: { type: Type.STRING },
-            operator: { type: Type.STRING },
-            province: { type: Type.STRING },
-            city: { type: Type.STRING },
-            district: { type: Type.STRING },
-            latitude: { type: Type.NUMBER },
-            longitude: { type: Type.NUMBER },
-            description: { type: Type.STRING },
-            longDistanceLines: { type: Type.INTEGER },
-            localLines: { type: Type.INTEGER },
-            longDistancePhones: { type: Type.INTEGER },
-            localPhones: { type: Type.INTEGER },
-            installedLines: { type: Type.INTEGER },
-            totalDuration: { type: Type.NUMBER }
-          },
-          required: ["name", "category", "operator", "province", "city", "district", "description"]
-        }
-      }
-    });
-
-    if (response && response.text) {
-      const parsed = JSON.parse(response.text.trim());
-      // Re-validate category values
-      const validCategories = ['survey', 'line', 'installation'];
-      if (!validCategories.includes(parsed.category)) {
-        parsed.category = 'survey';
-      }
-      parsed.floors = parsed.category === 'installation' ? (parsed.installedLines || 1) : 1;
-      parsed.location = `${parsed.province} ${parsed.city} ${parsed.district}`;
-      return parsed;
-    }
-  } catch (error) {
-    console.error("Gemini Parsing failed: ", error);
-  }
-
-  return fallbackRegexParser(userCaption, activeUserName);
-}
-
-// Fallback plain regex parser if Gemini is key-less or down
-function fallbackRegexParser(caption: string, username: string): any {
-  let category: 'survey' | 'line' | 'installation' = 'survey';
-  if (/line|kabel|sambungan/i.test(caption)) category = 'line';
-  else if (/install|pasang|selesai/i.test(caption)) category = 'installation';
-
-  const lines = caption.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-  
-  // Try line-by-line smart mapping if we don't have colon colons
-  let finalName = "Telegram " + (category.toUpperCase());
-  let province = "江西省";
-  let city = "鹰潭市";
-  let district = "月湖区";
-  let lat = 28.2435;
-  let lng = 117.0351;
-  let description = caption;
-  let installedLines = 1;
-
-  // Check if formatting is without colons (e.g. Jiangxi Fuzhou 6)
-  if (lines.length >= 2 && !caption.includes(':') && !caption.includes('：')) {
-    let locLine = lines[0];
-    const nameLine = lines[1];
-    
-    // Extract trailing number if present, e.g., "6" at the end of "江西抚州6"
-    const numberMatch = locLine.match(/(\d+)$/);
-    if (numberMatch) {
-      installedLines = parseInt(numberMatch[1], 10);
-      locLine = locLine.replace(/\d+$/, '').trim();
-    }
-    
-    // Simple checks for province and city mapping
-    if (locLine.includes("江西") || locLine.includes("Jiangxi")) {
-      province = "江西省";
-    } else if (locLine.includes("山东") || locLine.includes("Shandong")) {
-      province = "山东省";
-    }
-    
-    if (locLine.includes("抚州") || locLine.includes("Fuzhou")) {
-      city = "抚州市";
-      district = "临川区";
-      lat = 27.9863;
-      lng = 116.3584;
-    } else if (locLine.includes("鹰潭") || locLine.includes("Yingtan")) {
-      city = "鹰潭市";
-      district = "月湖区";
-      lat = 28.2435;
-      lng = 117.0351;
-    }
-    
-    finalName = nameLine;
-    
-    if (lines.length > 2) {
-      description = lines.slice(2).join('\n');
-    }
-  } else {
-    // Traditional colon search
-    const nameMatch = caption.match(/nama\s*[:：]\s*([^\n]+)/i);
-    const provinceMatch = caption.match(/provinsi\s*[:：]\s*([^\n]+)/i);
-    const cityMatch = caption.match(/kota\s*[:：]\s*([^\n]+)/i);
-    const districtMatch = caption.match(/kecamatan|district\s*[:：]\s*([^\n]+)/i);
-
-    const latMatch = caption.match(/lat(?:itude)?\s*[:：]\s*(-?\d+(?:\.\d+)?)/i);
-    const lngMatch = caption.match(/lon(?:gitude)?|lng\s*[:：]\s*(-?\d+(?:\.\d+)?)/i);
-
-    if (nameMatch) finalName = nameMatch[1].trim();
-    if (provinceMatch) province = provinceMatch[1].trim();
-    if (cityMatch) {
-      city = cityMatch[1].trim();
-      if (city.includes("抚州") || city.includes("Fuzhou")) {
-        city = "抚州市";
-        district = "临川区";
-        lat = 27.9863;
-        lng = 116.3584;
-      }
-    }
-    if (districtMatch) district = districtMatch[1].trim();
-    if (latMatch) lat = parseFloat(latMatch[1]);
-    if (lngMatch) lng = parseFloat(lngMatch[1]);
-  }
-
-  const operatorMatch = caption.match(/operator\s*[:：]\s*([^\n]+)/i);
-  const finalOperator = operatorMatch ? operatorMatch[1].trim() : username;
-
-  return {
-    name: finalName,
-    category,
-    operator: finalOperator,
-    province,
-    city,
-    district,
-    location: `${province} ${city} ${district}`,
-    latitude: lat,
-    longitude: lng,
-    description: description,
-    installedLines: installedLines,
-    floors: installedLines,
-    longDistanceLines: 0,
-    localLines: 0,
-    longDistancePhones: 0,
-    localPhones: 0,
-    totalDuration: 0
   };
-}
 
-// Spawns Vite development middleware or static production server
-async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
-  }
-
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`⚡️ Fullstack LXVOIP Application listening on http://0.0.0.0:${PORT}`);
-
-    // Register Telegram Bot Webhook on boot automatically
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const appUrl = process.env.APP_URL;
-    if (token && token !== "YOUR_TELEGRAM_BOT_TOKEN" && appUrl && appUrl !== "MY_APP_URL") {
-      getClientAuth()
-        .then(() => getDoc(doc(db, "settings", "telegram")))
-        .then((docSnap) => {
-          let enabled = true;
-          if (docSnap.exists()) {
-            const data = docSnap.data();
-            if (data && typeof data.enabled === "boolean") {
-              enabled = data.enabled;
-            }
-          }
-
-          if (enabled) {
-            const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-            console.log(`[Telegram Setup] Bot is enabled in settings. Registering webhook to ${webhookUrl}...`);
-            fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
-              .then(r => r.json())
-              .then(data => console.log("[Telegram Setup] Webhook registration response:", data))
-              .catch(err => console.error("[Telegram Setup] Failed to register webhook on boot:", err));
-          } else {
-            console.log("[Telegram Setup] Bot is DISABLED in settings. Deleting webhook...");
-            fetch(`https://api.telegram.org/bot${token}/deleteWebhook`)
-              .then(r => r.json())
-              .then(data => console.log("[Telegram Setup] Webhook deleted on start:", data))
-              .catch(err => console.error("[Telegram Setup] Failed to delete webhook on boot:", err));
-          }
-        })
-        .catch((dbErr) => {
-          console.warn("[Telegram Setup] Database check failed, registering webhook as fallback:", dbErr);
-          const webhookUrl = `${appUrl.replace(/\/$/, "")}/api/telegram-webhook`;
-          fetch(`https://api.telegram.org/bot${token}/setWebhook?url=${encodeURIComponent(webhookUrl)}`)
-            .then(r => r.json())
-            .catch(err => {});
-        });
-    } else {
-      console.log("[Telegram Setup] Webhook auto-registration skipped: Token or APP_URL is unconfigured/placeholder.");
+  const toggleBotState = async (nextState: boolean) => {
+    setIsToggling(true);
+    setWebhookError(null);
+    setWebhookResult(null);
+    try {
+      const res = await fetch('/api/telegram-toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextState })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setBotInfo(prev => prev ? { ...prev, enabled: data.enabled } : null);
+        if (data.telegramResult) {
+          setWebhookResult(data.telegramResult);
+        }
+      } else {
+        setWebhookError(data.error || 'Gagal merubah status bot.');
+      }
+    } catch (err: any) {
+      setWebhookError(err.message || 'Gagal mengirimkan perintah ke server.');
+    } finally {
+      setIsToggling(false);
     }
-  });
-}
+  };
 
-startServer();
+  const handleSaveChatId = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSavingChatId(true);
+    setSaveChatIdSuccess(false);
+    setSaveChatIdError(null);
+    try {
+      const res = await fetch('/api/telegram-save-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ forwardChatId: forwardChatIdInput })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setSaveChatIdSuccess(true);
+        setBotInfo(prev => prev ? { ...prev, forwardChatId: forwardChatIdInput } : null);
+        setTimeout(() => setSaveChatIdSuccess(false), 3000);
+      } else {
+        setSaveChatIdError(data.error || 'Gagal menyimpan Chat ID.');
+      }
+    } catch (err: any) {
+      setSaveChatIdError(err.message || 'Gagal mengirimkan data ke server.');
+    } finally {
+      setIsSavingChatId(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchBotInfo();
+  }, []);
+
+  const handleRegisterWebhook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsSettingWebhook(true);
+    setWebhookResult(null);
+    setWebhookError(null);
+
+    try {
+      const res = await fetch('/api/manual-webhook-setup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ customUrl })
+      });
+      
+      const resText = await res.text();
+      let data: any = {};
+      try {
+        data = resText ? JSON.parse(resText) : {};
+      } catch (parseErr) {
+        throw new Error(isIndo
+          ? `Server VPS mengembalikan respon non-JSON (Status ${res.status}). Silakan periksa apakah backend Anda berjalan dengan baik di VPS.`
+          : `VPS Server implementation returned non-JSON response (Status ${res.status}). Please check if your backend application is running properly.`);
+      }
+
+      if (!res.ok) {
+        setWebhookError(data.error || 'Failed to register webhook. Make sure Bot Token is configured.');
+      } else {
+        setWebhookResult(data.data);
+      }
+    } catch (err: any) {
+      setWebhookError(err.message || 'Network error occurred');
+    } finally {
+      setIsSettingWebhook(false);
+    }
+  };
+
+  const handleCopy = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedText(id);
+    setTimeout(() => setCopiedText(null), 2000);
+  };
+
+  const isIndo = lang === 'id';
+
+  const titleText = isIndo ? 'Integrasi Bot Telegram' : '电报机器人集成 (Telegram Bot)';
+  const descText = isIndo 
+    ? 'Kelola dan pelajari cara mengirimkan survei, kabel, dan instalasi langsung dari lapangan menggunakan Telegram Bot.' 
+    : '在此了解、链接并管理外勤测量员及管理员如何直接通过 Telegram 电报机器人回传现场多维勘探测线及施工数据。';
+
+  const statusLabel = isIndo ? 'Status Integrasi Bot' : '机器人对接状态';
+  const activeLabel = isIndo ? 'Aktif' : '已启用 (Active)';
+  const inactiveLabel = isIndo ? 'Nonaktif' : '未启用 / 缺失Token';
+  
+  const botUserLabel = isIndo ? 'Username Bot' : '机器人用户名';
+  const openBotText = isIndo ? 'Buka Bot Telegram' : '在 Telegram 中打开';
+  
+  const authTitle = isIndo ? '🔑 Langkah 1: Hubungkan Akun Surveyor (Autentikasi)' : '🔑 步骤一：绑定外勤人员账号 (身份认证)';
+  const authDesc = isIndo
+    ? 'Sebelum mengirim data, surveyor wajib menghubungkan Telegram mereka ke sistem agar tercatat sebagai operator resmi.'
+    : '在外勤人员向机器人投递图片前，需建立电报会话与系统“踩点员/管理员”账号映射，以便系统正确归属其操作名称。';
+
+  const sendTitle = isIndo ? '📸 Langkah 2: Kirim Foto/Video & Caption Lapangan' : '📸 步骤二：向机器人发送现场多图/视频及简本文字';
+  const sendDesc = isIndo
+    ? 'Kirim media lapangan Anda. Pada caption, tulis detail lokasi dengan format bebas. AI Gemini akan otomatis memilah!'
+    : '在 Telegram 聊天窗口中发送勘探现场照片或视频附件，同时在“附言 (Caption)”输入框中填写现场说明或地理信息，AI Gemini 将会自动从文字中提取字段填充至数据库。';
+
+  return (
+    <div id="telegram_bot_config_card" className="bg-white rounded-2xl border border-slate-100 p-6 flex flex-col gap-6 shadow-3xs animate-fade-in text-slate-700">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h2 className="font-sans font-black text-xl text-slate-900 flex items-center gap-2">
+            <Bot className="w-6 h-6 text-blue-600" />
+            {titleText}
+          </h2>
+          <p className="text-xs text-slate-400 mt-1 max-w-2xl">{descText}</p>
+        </div>
+        <button
+          onClick={fetchBotInfo}
+          disabled={isLoading}
+          className="flex items-center gap-1.5 self-start sm:self-center bg-slate-50 border border-slate-200 hover:bg-slate-100/85 hover:border-slate-300 rounded-xl px-3 py-1.5 text-xs font-bold text-slate-700 transition cursor-pointer"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          {isIndo ? 'Segarkan' : '刷新状态'}
+        </button>
+      </div>
+
+      {/* BOT STATUS BANNER WITH ON/OFF TOGGLE SWITCH */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className={`md:col-span-2 p-5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition duration-200 ${
+          botInfo?.active && botInfo?.enabled !== false
+            ? 'bg-emerald-50/50 border-emerald-100 text-emerald-800' 
+            : 'bg-slate-50 border-slate-200 text-slate-600'
+        }`}>
+          <div className="flex items-center gap-4">
+            <div className="relative flex h-3 w-3 shrink-0">
+              {botInfo?.active && botInfo?.enabled !== false && (
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              )}
+              <span className={`relative inline-flex rounded-full h-3 w-3 ${botInfo?.active && botInfo?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-400'}`}></span>
+            </div>
+            <div className="flex-grow">
+              <span className="text-[10px] font-black uppercase tracking-wider block text-slate-400">{statusLabel}</span>
+              <span className="text-sm font-black block mt-0.5">
+                {botInfo?.active 
+                  ? (botInfo?.enabled !== false 
+                      ? (isIndo ? 'Aktif (Berjalan 24/7)' : '已启用 (24/7 运行中)') 
+                      : (isIndo ? 'Dimatikan (OFF)' : '已关停 (OFF)'))
+                  : inactiveLabel}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 self-end sm:self-center">
+            {/* Toggle Power Pill */}
+            {botInfo?.active && (
+              <div className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-slate-200 shadow-3xs select-none">
+                <span className="text-xs font-bold text-slate-500 shrink-0">
+                  {isIndo ? 'Daya Bot:' : '电源开关:'}
+                </span>
+                <button
+                  onClick={() => toggleBotState(!(botInfo?.enabled !== false))}
+                  disabled={isToggling}
+                  type="button"
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    botInfo?.enabled !== false ? 'bg-emerald-500' : 'bg-slate-300'
+                  } ${isToggling ? 'opacity-60 cursor-not-allowed' : ''}`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-sm ring-0 transition duration-200 ease-in-out ${
+                      botInfo?.enabled !== false ? 'translate-x-5' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+                <span className={`text-xs font-black uppercase shrink-0 min-w-[24px] ${botInfo?.enabled !== false ? 'text-emerald-600' : 'text-slate-400'}`}>
+                  {botInfo?.enabled !== false ? 'ON' : 'OFF'}
+                </span>
+              </div>
+            )}
+
+            {botInfo?.active && botInfo?.enabled !== false && botInfo.botUsername && (
+              <a
+                href={`https://t.me/${botInfo.botUsername}`}
+                target="_blank"
+                rel="noreferrer"
+                className="flex items-center gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs py-2 px-3 rounded-lg transition shrink-0 shadow-xs"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                {openBotText}
+              </a>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-white p-5 rounded-2xl border border-slate-100 flex items-center justify-between gap-4 shadow-3xs">
+          <div>
+            <span className="text-[10px] font-black uppercase text-slate-400 tracking-wider block">{botUserLabel}</span>
+            <span className="text-sm font-bold text-slate-900 block mt-1 select-all">
+              {botInfo?.active && botInfo.botUsername ? `@${botInfo.botUsername}` : '—'}
+            </span>
+          </div>
+          <div className="w-10 h-10 bg-blue-50 rounded-xl flex items-center justify-center text-blue-600">
+            <Send className="w-5 h-5" />
+          </div>
+        </div>
+      </div>
+
+      {/* TARGET CHAT ID FORWARDING CONFIGURATION */}
+      <div id="telegram_chat_id_config_form" className="bg-slate-50 rounded-2xl border border-slate-200/50 p-5 flex flex-col gap-4">
+        <div>
+          <h3 className="font-sans font-black text-sm text-slate-900 flex items-center gap-1.5">
+            <Send className="w-4.5 h-4.5 text-blue-600 animate-pulse" />
+            {isIndo ? 'Target Chat ID Penerusan Laporan' : '设置一键转发 Telegram 目标 ID'}
+          </h3>
+          <p className="text-[11px] text-slate-400 mt-1">
+            {isIndo
+              ? 'Masukkan ID Chat target (bisa berupa ID Pengguna, ID Group/Supergroup negatif seperti -100xxxxxxxxxx, atau Channel Telegram) di mana bot akan meneruskan laporan data saat Anda mengklik tombol "Kirim Sekarang ke Telegram" di panel situs.'
+              : '输入接收一键转发的目标 Telegram 会话 ID（例如个人 Chat ID、带负号的群组/超级群组 ID 如 -100xxxxxxxxxx，也可以是公开频道名）。配置完成后，在各个数据详情页点击“立即发送至 Telegram”即可通过本机器人完成推送转发。'}
+          </p>
+        </div>
+
+        <form onSubmit={handleSaveChatId} className="flex flex-col sm:flex-row gap-3">
+          <div className="flex-grow">
+            <input
+              type="text"
+              value={forwardChatIdInput}
+              onChange={(e) => setForwardChatIdInput(e.target.value)}
+              placeholder="-1001234567890"
+              required
+              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs text-slate-800 placeholder-slate-400 font-mono shadow-xs focus:ring-1 focus:ring-blue-500 focus:outline-none transition h-10"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={isSavingChatId}
+            className="bg-slate-900 hover:bg-slate-800 text-white font-black text-xs py-2 px-5 rounded-xl flex items-center justify-center gap-1.5 transition shrink-0 cursor-pointer h-10 min-w-[120px]"
+          >
+            {isSavingChatId ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                {isIndo ? 'Menyimpan...' : '保存中...'}
+              </>
+            ) : (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                {isIndo ? 'Simpan Setelan' : '保存设置'}
+              </>
+            )}
+          </button>
+        </form>
+
+        {saveChatIdSuccess && (
+          <div className="bg-emerald-50 rounded-xl border border-emerald-100 p-4 text-emerald-800 text-xs flex gap-3 animate-fade-in">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-1 w-full">
+              <span className="font-extrabold">{isIndo ? 'Sukses Memperbarui Target Chat ID!' : '成功更新转发目标 ID！'}</span>
+              <span className="text-[11px] text-slate-600 font-medium">
+                {isIndo ? 'Bot sekarang siap meneruskan laporan ke target!' : '机器人已准备好将后续网页上的一键转发传达至该会话！'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {saveChatIdError && (
+          <div className="bg-rose-50 rounded-xl border border-rose-100 p-4 text-rose-800 text-xs flex gap-3 animate-fade-in">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-1 w-full font-medium">
+              <span className="font-extrabold">{isIndo ? 'Gagal Menyimpan' : '更新目标失败'}</span>
+              <span className="text-[11px] text-rose-700">
+                {saveChatIdError}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {!botInfo?.active && (
+        <div className="bg-amber-50 rounded-2xl border border-amber-200/60 p-4 flex gap-3 text-amber-900">
+          <ShieldAlert className="w-5 h-5 text-amber-500 shrink-0 mt-0.5" />
+          <div className="text-xs flex flex-col gap-1.5">
+            <span className="font-extrabold block">
+              {isIndo ? 'Token Bot Telegram Belum Diatur' : '电报机器人尚未就绪'}
+            </span>
+            <span>
+              {isIndo 
+                ? 'Silakan tambahkan variabel lingkungan `TELEGRAM_BOT_TOKEN` di panel rahasia AI Studio. Mintalah token dari @BotFather di Telegram lalu terapkan.'
+                : '系统在其运行环境中检测到您未设定或仍处于占位符状态的 `TELEGRAM_BOT_TOKEN` 环境变量。请前往 AI Studio 左下角 Secrets / Key 设定看板或 VPS 環境，配置真实的电报 Authorization Token，重启服务器后即可开始运作。'}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* MANUAL/VPS WEBHOOK INTEGRATION PANEL */}
+      <div id="vps_webhook_config_form" className="bg-slate-50 rounded-2xl border border-slate-200/50 p-5 flex flex-col gap-4">
+        <div>
+          <h3 className="font-sans font-black text-sm text-slate-900 flex items-center gap-1.5">
+            <Globe className="w-4.5 h-4.5 text-blue-600" />
+            {isIndo ? 'Konfigurasi Webhook VPS (Wajib HTTPS)' : '配置部署在 VPS 上的 HTTPS Webhook'}
+          </h3>
+          <p className="text-[11px] text-slate-400 mt-1">
+            {isIndo
+              ? 'Telegram mewajibkan HTTPS (SSL) untuk menyambungkan webhook. Jika Anda mendeploy sistem di VPS seperti http://154.38.116.170/, Anda wajib menghubungkan domain dengan SSL (contoh: https://eki.my.id atau nama domain lain) ke IP VPS tersebut melalui SSL/TLS (Certbot / Cloudflare), lalu daftarkan URL-nya di bawah.'
+              : 'Telegram 机器人要求 Webhook 的目标传输地址必须是通过 SSL 加密的 https:// 链接。如需让部署在 VPS 中的电报接收器实时生效，请先为 154.38.116.170 绑定域名及 HTTPS，并在下方填入该 HTTPS 域名。'}
+          </p>
+        </div>
+
+        <form onSubmit={handleRegisterWebhook} className="flex flex-col sm:flex-row gap-3">
+          <div className="flex-grow">
+            <input
+              type="text"
+              value={customUrl}
+              onChange={(e) => setCustomUrl(e.target.value)}
+              placeholder="https://eki.my.id"
+              required
+              className="w-full bg-white border border-slate-200 rounded-xl px-4 py-2 text-xs text-slate-800 placeholder-slate-400 font-mono shadow-xs focus:ring-1 focus:ring-blue-500 focus:outline-none transition h-10"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={isSettingWebhook}
+            className="bg-blue-600 hover:bg-blue-700 text-white font-black text-xs py-2 px-5 rounded-xl flex items-center justify-center gap-1.5 transition shrink-0 cursor-pointer disabled:opacity-50 h-10"
+          >
+            {isSettingWebhook ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                {isIndo ? 'Menghubungkan...' : '配置中...'}
+              </>
+            ) : (
+              <>
+                <Check className="w-3.5 h-3.5" />
+                {isIndo ? 'Hubungkan Webhook' : 'Aktivasi Webhook'}
+              </>
+            )}
+          </button>
+        </form>
+
+        {/* FEEDBACK STATE FROM TELEGRAM API */}
+        {webhookResult && (
+          <div className="bg-emerald-50 rounded-xl border border-emerald-100 p-4 text-emerald-800 text-xs flex gap-3 animate-fade-in">
+            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-1 w-full overflow-hidden">
+              <span className="font-extrabold">{isIndo ? 'Sukses Mendaftarkan Webhook!' : '成功自 Telegram 处建立 Webhook 映射！'}</span>
+              <span className="text-[11px] text-slate-600 break-all font-mono">
+                {JSON.stringify(webhookResult)}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {webhookError && (
+          <div className="bg-rose-50 rounded-xl border border-rose-100 p-4 text-rose-800 text-xs flex gap-3 animate-fade-in">
+            <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+            <div className="flex flex-col gap-1 w-full">
+              <span className="font-extrabold">{isIndo ? 'Gagal Menghubungkan' : '更新 Webhook 失败'}</span>
+              <span className="text-[11px] text-rose-700">
+                {webhookError}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+
+    </div>
+  );
+}
