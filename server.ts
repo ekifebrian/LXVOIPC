@@ -1235,6 +1235,15 @@ function getAbsoluteMediaUrl(item: any): string {
   return url;
 }
 
+function isItemVideo(item: any): boolean {
+  if (!item) return false;
+  if (typeof item !== "string" && item.type === "video") {
+    return true;
+  }
+  const url = typeof item === "string" ? item : (item.url || "");
+  return isVideoUrl(url);
+}
+
 async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any) {
   try {
     const payload: any = {
@@ -1264,10 +1273,16 @@ async function sendTelegramVideo(chatId: string | number, videoUrl: string, capt
 
 async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string) {
   try {
-    const truncatedMedia = mediaList.slice(0, 10);
+    // Filter and sanitize media items to ensure we don't send empty or invalid items
+    const validItems = mediaList.filter(item => {
+      const url = getAbsoluteMediaUrl(item);
+      return url && url.trim() !== "";
+    });
+
+    const truncatedMedia = validItems.slice(0, 10);
     const mediaPayload = truncatedMedia.map((item, index) => {
       const url = getAbsoluteMediaUrl(item);
-      const isVideo = isVideoUrl(url);
+      const isVideo = isItemVideo(item);
       
       const mediaItem: any = {
         type: isVideo ? "video" : "photo",
@@ -1281,12 +1296,14 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       return mediaItem;
     });
 
+    // The Telegram API dictates that the 'media' field in a JSON payload passed to sendMediaGroup
+    // MUST be a JSON-serialized string of the InputMedia array, even when using Content-Type: application/json.
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        media: mediaPayload
+        media: JSON.stringify(mediaPayload)
       })
     });
 
@@ -1296,7 +1313,7 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       
       const firstItem = truncatedMedia[0];
       const url = getAbsoluteMediaUrl(firstItem);
-      if (isVideoUrl(url)) {
+      if (isItemVideo(firstItem)) {
         await sendTelegramVideo(chatId, url, caption, token);
       } else {
         await sendTelegramPhoto(chatId, url, caption, token);
@@ -1304,8 +1321,9 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       
       if (truncatedMedia.length > 1) {
         for (let i = 1; i < truncatedMedia.length; i++) {
-          const itemUrl = getAbsoluteMediaUrl(truncatedMedia[i]);
-          if (isVideoUrl(itemUrl)) {
+          const innerItem = truncatedMedia[i];
+          const itemUrl = getAbsoluteMediaUrl(innerItem);
+          if (isItemVideo(innerItem)) {
             await sendTelegramVideo(chatId, itemUrl, "", token);
           } else {
             await sendTelegramPhoto(chatId, itemUrl, "", token);
