@@ -341,6 +341,11 @@ app.post("/api/telegram-forward", async (req, res) => {
 
     const building = buildingSnap.data() as any;
 
+    // Dynamically build the absolute base URL based on req headers to prevent relative "/uploads" errors on dev server previews
+    const host = req.get("host") || "";
+    const protocol = host.includes("localhost") || host.includes("127.0.0.1") ? "http" : "https";
+    const baseUrl = `${protocol}://${host}`;
+
     // 3. Format message in Indonesian and Chinese using robust HTML tags (prevents Markdown syntax parse failures)
     let categoryLabel = building.category || "";
     if (categoryLabel === "survey") categoryLabel = "踩点 / SURVEY";
@@ -360,7 +365,11 @@ app.post("/api/telegram-forward", async (req, res) => {
     const safeOperator = escapeHtml(building.operator || "N/A");
     const safeOperationTime = escapeHtml(building.operationTime || "N/A");
     const safeLocation = escapeHtml(building.location || "N/A");
-    const safeDescText = escapeHtml(building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。");
+
+    // Strictly limit description in caption to prevent Telegram API 400 Bad Request (Caption must be 0-1024 characters)
+    const rawDesc = building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。";
+    const truncatedDesc = rawDesc.length > 400 ? rawDesc.substring(0, 400) + "..." : rawDesc;
+    const safeDescText = escapeHtml(truncatedDesc);
     const safeCategoryLabel = escapeHtml(categoryLabel);
 
     let techSpecsHtml = "";
@@ -376,14 +385,14 @@ app.post("/api/telegram-forward", async (req, res) => {
 
     // 4. Send with Photo or Media Group if gallery contains any media items
     if (building.gallery && building.gallery.length > 1) {
-      await sendTelegramMediaGroup(forwardChatId, building.gallery, textPayloadHtml, token, "HTML");
+      await sendTelegramMediaGroup(forwardChatId, building.gallery, textPayloadHtml, token, "HTML", baseUrl);
     } else if (building.gallery && building.gallery.length === 1) {
       const singleMedia = building.gallery[0];
-      const url = getAbsoluteMediaUrl(singleMedia);
+      const url = getAbsoluteMediaUrl(singleMedia, baseUrl);
       if (isVideoUrl(url)) {
-        await sendTelegramVideo(forwardChatId, url, textPayloadHtml, token, null, "HTML");
+        await sendTelegramVideo(forwardChatId, url, textPayloadHtml, token, null, "HTML", baseUrl);
       } else {
-        await sendTelegramPhoto(forwardChatId, url, textPayloadHtml, token, null, "HTML");
+        await sendTelegramPhoto(forwardChatId, url, textPayloadHtml, token, null, "HTML", baseUrl);
       }
     } else {
       await sendTelegramMessage(forwardChatId, textPayloadHtml, token, null, "HTML");
@@ -1181,11 +1190,12 @@ async function sendTelegramMessage(chatId: string | number, text: string, token:
   }
 }
 
-async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown") {
+async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown", baseUrl?: string) {
   try {
+    const absolutePhotoUrl = getAbsoluteMediaUrl(photoUrl, baseUrl);
     const payload: any = {
       chat_id: chatId,
-      photo: photoUrl,
+      photo: absolutePhotoUrl,
       caption: caption,
       parse_mode: parseMode
     };
@@ -1223,13 +1233,13 @@ function isVideoUrl(url: string): boolean {
          cleanUrl.includes('youtu.be/');
 }
 
-function getAbsoluteMediaUrl(item: any): string {
+function getAbsoluteMediaUrl(item: any, baseUrl?: string): string {
   if (!item) return "";
   let url = typeof item === 'string' ? item : (item.url || "");
   if (!url) return "";
   // Check if url is a relative pathname starting with "/"
   if (url.startsWith("/")) {
-    const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+    const appUrl = (baseUrl || process.env.APP_URL || "").replace(/\/$/, "");
     return `${appUrl}${url}`;
   }
   return url;
@@ -1244,11 +1254,12 @@ function isItemVideo(item: any): boolean {
   return isVideoUrl(url);
 }
 
-async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown") {
+async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown", baseUrl?: string) {
   try {
+    const absoluteVideoUrl = getAbsoluteMediaUrl(videoUrl, baseUrl);
     const payload: any = {
       chat_id: chatId,
-      video: videoUrl,
+      video: absoluteVideoUrl,
       caption: caption,
       parse_mode: parseMode
     };
@@ -1271,17 +1282,17 @@ async function sendTelegramVideo(chatId: string | number, videoUrl: string, capt
   }
 }
 
-async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string, parseMode: string = "Markdown") {
+async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string, parseMode: string = "Markdown", baseUrl?: string) {
   try {
     // Filter and sanitize media items to ensure we don't send empty or invalid items
     const validItems = mediaList.filter(item => {
-      const url = getAbsoluteMediaUrl(item);
+      const url = getAbsoluteMediaUrl(item, baseUrl);
       return url && url.trim() !== "";
     });
 
     const truncatedMedia = validItems.slice(0, 10);
     const mediaPayload = truncatedMedia.map((item, index) => {
-      const url = getAbsoluteMediaUrl(item);
+      const url = getAbsoluteMediaUrl(item, baseUrl);
       const isVideo = isItemVideo(item);
       
       const mediaItem: any = {
@@ -1296,27 +1307,27 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       return mediaItem;
     });
 
-    // 1. Try sending as standard plain JSON nested array (the correct way for application/json)
+    // 1. Double-stringified JSON is officially required for sendMediaGroup when using Content-Type: application/json
     let res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        media: mediaPayload
+        media: JSON.stringify(mediaPayload)
       })
     });
 
-    // 2. If standard way fails, try double-stringified JSON format fallback
+    // 2. If double-stringified standard JSON fails, retry raw objects fallback structure
     if (!res.ok) {
       const errText = await res.text();
-      console.warn("[Telegram sendMediaGroup standard JSON failed, retrying double-stringified array fallback... Error details]:", errText);
+      console.warn("[Telegram sendMediaGroup double-stringified failed, retrying plain nested array fallback...]:", errText);
       
       res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           chat_id: chatId,
-          media: JSON.stringify(mediaPayload)
+          media: mediaPayload
         })
       });
     }
@@ -1327,28 +1338,28 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       console.warn("[Telegram sendMediaGroup completely failed, falling back to sequential individual media messages! Response]:", errResultText);
       
       const firstItem = truncatedMedia[0];
-      const url = getAbsoluteMediaUrl(firstItem);
+      const url = getAbsoluteMediaUrl(firstItem, baseUrl);
       if (isItemVideo(firstItem)) {
-        await sendTelegramVideo(chatId, url, caption, token, null, parseMode);
+        await sendTelegramVideo(chatId, url, caption, token, null, parseMode, baseUrl);
       } else {
-        await sendTelegramPhoto(chatId, url, caption, token, null, parseMode);
+        await sendTelegramPhoto(chatId, url, caption, token, null, parseMode, baseUrl);
       }
       
       if (truncatedMedia.length > 1) {
         for (let i = 1; i < truncatedMedia.length; i++) {
           const innerItem = truncatedMedia[i];
-          const itemUrl = getAbsoluteMediaUrl(innerItem);
+          const itemUrl = getAbsoluteMediaUrl(innerItem, baseUrl);
           if (isItemVideo(innerItem)) {
-            await sendTelegramVideo(chatId, itemUrl, "", token, null, parseMode);
+            await sendTelegramVideo(chatId, itemUrl, "", token, null, parseMode, baseUrl);
           } else {
-            await sendTelegramPhoto(chatId, itemUrl, "", token, null, parseMode);
+            await sendTelegramPhoto(chatId, itemUrl, "", token, null, parseMode, baseUrl);
           }
         }
       }
     }
   } catch (err) {
     console.error("Failed to send media group to Telegram:", err);
-    await sendTelegramMessage(chatId, caption, token, null, parseMode);
+    throw err;
   }
 }
 
