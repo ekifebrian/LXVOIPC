@@ -360,7 +360,7 @@ app.post("/api/telegram-forward", async (req, res) => {
     const safeOperator = escapeHtml(building.operator || "N/A");
     const safeOperationTime = escapeHtml(building.operationTime || "N/A");
     const safeLocation = escapeHtml(building.location || "N/A");
-    const safeDescText = escapeHtml(descText);
+    const safeDescText = escapeHtml(building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。");
     const safeCategoryLabel = escapeHtml(categoryLabel);
 
     let techSpecsHtml = "";
