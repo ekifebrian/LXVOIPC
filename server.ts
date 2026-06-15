@@ -341,52 +341,52 @@ app.post("/api/telegram-forward", async (req, res) => {
 
     const building = buildingSnap.data() as any;
 
-    // 3. Format message in Indonesian and Chinese
+    // 3. Format message in Indonesian and Chinese using robust HTML tags (prevents Markdown syntax parse failures)
     let categoryLabel = building.category || "";
     if (categoryLabel === "survey") categoryLabel = "踩点 / SURVEY";
     else if (categoryLabel === "line") categoryLabel = "排线 / LINE";
     else if (categoryLabel === "installation") categoryLabel = "安装 / INSTALLATION";
     else categoryLabel = categoryLabel.toUpperCase();
 
-    let techSpecs = "";
+    const escapeHtml = (text: string) => {
+      if (!text) return "";
+      return String(text)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    };
+
+    const safeName = escapeHtml(building.name || "Situs Tanpa Nama");
+    const safeOperator = escapeHtml(building.operator || "N/A");
+    const safeOperationTime = escapeHtml(building.operationTime || "N/A");
+    const safeLocation = escapeHtml(building.location || "N/A");
+    const safeDescText = escapeHtml(descText);
+    const safeCategoryLabel = escapeHtml(categoryLabel);
+
+    let techSpecsHtml = "";
     if (building.category === "survey") {
-      techSpecs = `• 长途线路数量 (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• 本地线路数量 (Local Lines): *${building.localLines || 0}* 根`;
+      techSpecsHtml = `• 长途线路数量 (Long Distance Lines): <b>${building.longDistanceLines || 0}</b> 根\n• 本地线路数量 (Local Lines): <b>${building.localLines || 0}</b> 根`;
     } else if (building.category === "line") {
-      techSpecs = `• 长途电话数量 (Long Distance Phones): *${building.longDistancePhones || 0}* 台\n• 本地电话数量 (Local Phones): *${building.localPhones || 0}* 台`;
+      techSpecsHtml = `• 长途电话数量 (Long Distance Phones): <b>${building.longDistancePhones || 0}</b> 台\n• 本地电话数量 (Local Phones): <b>${building.localPhones || 0}</b> 台`;
     } else if (building.category === "installation") {
-      techSpecs = `• Jalur Jauh (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• Jalur Lokal (Local Lines): *${building.localLines || 0}* 根\n• 总时长 (Total Duration): *${building.totalDuration || 0}* 小时`;
+      techSpecsHtml = `• Jalur Jauh (Long Distance Lines): <b>${building.longDistanceLines || 0}</b> 根\n• Jalur Lokal (Local Lines): <b>${building.localLines || 0}</b> 根\n• 总时长 (Total Duration): <b>${building.totalDuration || 0}</b> 小时`;
     }
 
-    const descText = building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。";
-
-    const textPayload = `🏢 *${building.name || "Situs Tanpa Nama"}*
-
-📌 *Kategori / 类别*: [${categoryLabel}]
-👤 *Operator / 操作人*: ${building.operator || "N/A"}
-⏰ *Waktu / 操作时间*: ${building.operationTime || "N/A"}
-📍 *Lokasi / 地点*: ${building.location || "N/A"}
-
-🔌 *Spesifikasi Metrik Teknis / 技术指标*:
-${techSpecs}
-
-📝 *Keterangan Lapangan / 描述*:
-${descText}
-
-📋 _Dikirim langsung dari LXVOIP Web Admin Portal_`;
+    const textPayloadHtml = `🏢 <b>${safeName}</b>\n\n📌 <b>Kategori / 类别</b>: [${safeCategoryLabel}]\n👤 <b>Operator / 操作人</b>: ${safeOperator}\n⏰ <b>Waktu / 操作时间</b>: ${safeOperationTime}\n📍 <b>Lokasi / 地点</b>: ${safeLocation}\n\n🔌 <b>Spesifikasi Metrik Teknis / 技术指标</b>:\n${techSpecsHtml}\n\n📝 <b>Keterangan Lapangan / 描述</b>:\n${safeDescText}\n\n📋 <i>Dikirim langsung dari LXVOIP Web Admin Portal</i>`;
 
     // 4. Send with Photo or Media Group if gallery contains any media items
     if (building.gallery && building.gallery.length > 1) {
-      await sendTelegramMediaGroup(forwardChatId, building.gallery, textPayload, token);
+      await sendTelegramMediaGroup(forwardChatId, building.gallery, textPayloadHtml, token, "HTML");
     } else if (building.gallery && building.gallery.length === 1) {
       const singleMedia = building.gallery[0];
       const url = getAbsoluteMediaUrl(singleMedia);
       if (isVideoUrl(url)) {
-        await sendTelegramVideo(forwardChatId, url, textPayload, token);
+        await sendTelegramVideo(forwardChatId, url, textPayloadHtml, token, null, "HTML");
       } else {
-        await sendTelegramPhoto(forwardChatId, url, textPayload, token);
+        await sendTelegramPhoto(forwardChatId, url, textPayloadHtml, token, null, "HTML");
       }
     } else {
-      await sendTelegramMessage(forwardChatId, textPayload, token);
+      await sendTelegramMessage(forwardChatId, textPayloadHtml, token, null, "HTML");
     }
 
     return res.json({ ok: true, message: "Berhasil dteruskan ke Telegram!", targetChatId: forwardChatId });
@@ -1161,12 +1161,12 @@ async function downloadTelegramFile(filePath: string, token: string): Promise<Bu
   return null;
 }
 
-async function sendTelegramMessage(chatId: string | number, text: string, token: string, replyMarkup?: any) {
+async function sendTelegramMessage(chatId: string | number, text: string, token: string, replyMarkup?: any, parseMode: string = "Markdown") {
   try {
     const payload: any = {
       chat_id: chatId,
       text: text,
-      parse_mode: "Markdown"
+      parse_mode: parseMode
     };
     if (replyMarkup) {
       payload.reply_markup = replyMarkup;
@@ -1181,13 +1181,13 @@ async function sendTelegramMessage(chatId: string | number, text: string, token:
   }
 }
 
-async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any) {
+async function sendTelegramPhoto(chatId: string | number, photoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown") {
   try {
     const payload: any = {
       chat_id: chatId,
       photo: photoUrl,
       caption: caption,
-      parse_mode: "Markdown"
+      parse_mode: parseMode
     };
     if (replyMarkup) {
       payload.reply_markup = replyMarkup;
@@ -1200,11 +1200,11 @@ async function sendTelegramPhoto(chatId: string | number, photoUrl: string, capt
     if (!res.ok) {
       const errText = await res.text();
       console.warn("[Telegram sendPhoto Error, falling back to sendMessage]:", errText);
-      await sendTelegramMessage(chatId, caption, token, replyMarkup);
+      await sendTelegramMessage(chatId, caption, token, replyMarkup, parseMode);
     }
   } catch (err) {
     console.error("Failed to send photo to Telegram, falling back to text:", err);
-    await sendTelegramMessage(chatId, caption, token, replyMarkup);
+    await sendTelegramMessage(chatId, caption, token, replyMarkup, parseMode);
   }
 }
 
@@ -1244,13 +1244,13 @@ function isItemVideo(item: any): boolean {
   return isVideoUrl(url);
 }
 
-async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any) {
+async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any, parseMode: string = "Markdown") {
   try {
     const payload: any = {
       chat_id: chatId,
       video: videoUrl,
       caption: caption,
-      parse_mode: "Markdown"
+      parse_mode: parseMode
     };
     if (replyMarkup) {
       payload.reply_markup = replyMarkup;
@@ -1263,15 +1263,15 @@ async function sendTelegramVideo(chatId: string | number, videoUrl: string, capt
     if (!res.ok) {
       const errText = await res.text();
       console.warn("[Telegram sendVideo Error, falling back to sendMessage]:", errText);
-      await sendTelegramMessage(chatId, caption, token, replyMarkup);
+      await sendTelegramMessage(chatId, caption, token, replyMarkup, parseMode);
     }
   } catch (err) {
     console.error("Failed to send video to Telegram, falling back to text:", err);
-    await sendTelegramMessage(chatId, caption, token, replyMarkup);
+    await sendTelegramMessage(chatId, caption, token, replyMarkup, parseMode);
   }
 }
 
-async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string) {
+async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string, parseMode: string = "Markdown") {
   try {
     // Filter and sanitize media items to ensure we don't send empty or invalid items
     const validItems = mediaList.filter(item => {
@@ -1291,32 +1291,47 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       
       if (index === 0) {
         mediaItem.caption = caption;
-        mediaItem.parse_mode = "Markdown";
+        mediaItem.parse_mode = parseMode;
       }
       return mediaItem;
     });
 
-    // The Telegram API dictates that the 'media' field in a JSON payload passed to sendMediaGroup
-    // MUST be a JSON-serialized string of the InputMedia array, even when using Content-Type: application/json.
-    const res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+    // 1. Try sending as standard plain JSON nested array (the correct way for application/json)
+    let res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        media: JSON.stringify(mediaPayload)
+        media: mediaPayload
       })
     });
 
+    // 2. If standard way fails, try double-stringified JSON format fallback
     if (!res.ok) {
       const errText = await res.text();
-      console.warn("[Telegram sendMediaGroup Error, falling back to single media/message split]:", errText);
+      console.warn("[Telegram sendMediaGroup standard JSON failed, retrying double-stringified array fallback... Error details]:", errText);
+      
+      res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          media: JSON.stringify(mediaPayload)
+        })
+      });
+    }
+
+    // 3. If BOTH formats failed, fallback sequentially to individual media items
+    if (!res.ok) {
+      const errResultText = await res.text();
+      console.warn("[Telegram sendMediaGroup completely failed, falling back to sequential individual media messages! Response]:", errResultText);
       
       const firstItem = truncatedMedia[0];
       const url = getAbsoluteMediaUrl(firstItem);
       if (isItemVideo(firstItem)) {
-        await sendTelegramVideo(chatId, url, caption, token);
+        await sendTelegramVideo(chatId, url, caption, token, null, parseMode);
       } else {
-        await sendTelegramPhoto(chatId, url, caption, token);
+        await sendTelegramPhoto(chatId, url, caption, token, null, parseMode);
       }
       
       if (truncatedMedia.length > 1) {
@@ -1324,16 +1339,16 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
           const innerItem = truncatedMedia[i];
           const itemUrl = getAbsoluteMediaUrl(innerItem);
           if (isItemVideo(innerItem)) {
-            await sendTelegramVideo(chatId, itemUrl, "", token);
+            await sendTelegramVideo(chatId, itemUrl, "", token, null, parseMode);
           } else {
-            await sendTelegramPhoto(chatId, itemUrl, "", token);
+            await sendTelegramPhoto(chatId, itemUrl, "", token, null, parseMode);
           }
         }
       }
     }
   } catch (err) {
     console.error("Failed to send media group to Telegram:", err);
-    await sendTelegramMessage(chatId, caption, token);
+    await sendTelegramMessage(chatId, caption, token, null, parseMode);
   }
 }
 
