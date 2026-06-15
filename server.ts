@@ -100,12 +100,17 @@ async function syncBotUser() {
 // Fire off the sync in background
 syncBotUser();
 
+let cachedUser: any = null;
 let authPromise: Promise<any> | null = null;
 
 // Ensure client SDK is authenticated to perform storage uploads
 async function getClientAuth() {
+  if (cachedUser) {
+    return cachedUser;
+  }
   if (auth.currentUser) {
-    return auth.currentUser;
+    cachedUser = auth.currentUser;
+    return cachedUser;
   }
   if (authPromise) {
     return authPromise;
@@ -115,17 +120,20 @@ async function getClientAuth() {
     try {
       const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
       console.log("[Firebase Client Auth] Authenticated telegram-bot-service successfully");
+      cachedUser = userCred.user;
       return userCred.user;
     } catch (err: any) {
       if (err.code === "auth/user-not-found" || err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
         try {
           const userCred = await createUserWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
           console.log("[Firebase Client Auth] Created and authenticated telegram-bot-service");
+          cachedUser = userCred.user;
           return userCred.user;
         } catch (createErr: any) {
           console.warn("[Firebase Client Auth] Failed to create telegram-bot-service account:", createErr.message || createErr);
           try {
             const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+            cachedUser = userCred.user;
             return userCred.user;
           } catch (retryErr: any) {
             console.warn("[Firebase Client Auth] Bot service retry signin failed:", retryErr.message || retryErr);
@@ -140,12 +148,14 @@ async function getClientAuth() {
     try {
       const userCred = await signInWithEmailAndPassword(auth, "admin@admin.com", "admin123");
       console.log("[Firebase Client Auth] Authenticated as admin fallback successfully");
+      cachedUser = userCred.user;
       return userCred.user;
     } catch (adminErr: any) {
       if (adminErr.code === "auth/user-not-found" || adminErr.code === "auth/invalid-credential" || adminErr.code === "auth/wrong-password") {
         try {
           const userCred = await createUserWithEmailAndPassword(auth, "admin@admin.com", "admin123");
           console.log("[Firebase Client Auth] Created and authenticated demo admin account");
+          cachedUser = userCred.user;
           return userCred.user;
         } catch (createAdminErr: any) {
           console.warn("[Firebase Client Auth] Admin fallback create failed:", createAdminErr.message || createAdminErr);
