@@ -374,15 +374,17 @@ ${descText}
 
 📋 _Dikirim langsung dari LXVOIP Web Admin Portal_`;
 
-    // 4. Send with Photo if gallery contains any image URLs
-    let photoUrl = "";
-    if (building.gallery && building.gallery.length > 0) {
-      const firstMedia = building.gallery[0];
-      photoUrl = typeof firstMedia === "string" ? firstMedia : (firstMedia?.url || "");
-    }
-
-    if (photoUrl && photoUrl.startsWith("http")) {
-      await sendTelegramPhoto(forwardChatId, photoUrl, textPayload, token);
+    // 4. Send with Photo or Media Group if gallery contains any media items
+    if (building.gallery && building.gallery.length > 1) {
+      await sendTelegramMediaGroup(forwardChatId, building.gallery, textPayload, token);
+    } else if (building.gallery && building.gallery.length === 1) {
+      const singleMedia = building.gallery[0];
+      const url = getAbsoluteMediaUrl(singleMedia);
+      if (isVideoUrl(url)) {
+        await sendTelegramVideo(forwardChatId, url, textPayload, token);
+      } else {
+        await sendTelegramPhoto(forwardChatId, url, textPayload, token);
+      }
     } else {
       await sendTelegramMessage(forwardChatId, textPayload, token);
     }
@@ -1203,6 +1205,117 @@ async function sendTelegramPhoto(chatId: string | number, photoUrl: string, capt
   } catch (err) {
     console.error("Failed to send photo to Telegram, falling back to text:", err);
     await sendTelegramMessage(chatId, caption, token, replyMarkup);
+  }
+}
+
+function isVideoUrl(url: string): boolean {
+  if (!url) return false;
+  if (url.startsWith('data:video/')) {
+    return true;
+  }
+  const cleanUrl = url.split('?')[0].toLowerCase();
+  return cleanUrl.endsWith('.mp4') || 
+         cleanUrl.endsWith('.webm') || 
+         cleanUrl.endsWith('.ogg') || 
+         cleanUrl.endsWith('.mov') ||
+         cleanUrl.includes('youtube.com/embed/') || 
+         cleanUrl.includes('youtube.com/watch') || 
+         cleanUrl.includes('youtu.be/');
+}
+
+function getAbsoluteMediaUrl(item: any): string {
+  if (!item) return "";
+  let url = typeof item === 'string' ? item : (item.url || "");
+  if (!url) return "";
+  // Check if url is a relative pathname starting with "/"
+  if (url.startsWith("/")) {
+    const appUrl = (process.env.APP_URL || "").replace(/\/$/, "");
+    return `${appUrl}${url}`;
+  }
+  return url;
+}
+
+async function sendTelegramVideo(chatId: string | number, videoUrl: string, caption: string, token: string, replyMarkup?: any) {
+  try {
+    const payload: any = {
+      chat_id: chatId,
+      video: videoUrl,
+      caption: caption,
+      parse_mode: "Markdown"
+    };
+    if (replyMarkup) {
+      payload.reply_markup = replyMarkup;
+    }
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendVideo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn("[Telegram sendVideo Error, falling back to sendMessage]:", errText);
+      await sendTelegramMessage(chatId, caption, token, replyMarkup);
+    }
+  } catch (err) {
+    console.error("Failed to send video to Telegram, falling back to text:", err);
+    await sendTelegramMessage(chatId, caption, token, replyMarkup);
+  }
+}
+
+async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string) {
+  try {
+    const truncatedMedia = mediaList.slice(0, 10);
+    const mediaPayload = truncatedMedia.map((item, index) => {
+      const url = getAbsoluteMediaUrl(item);
+      const isVideo = isVideoUrl(url);
+      
+      const mediaItem: any = {
+        type: isVideo ? "video" : "photo",
+        media: url
+      };
+      
+      if (index === 0) {
+        mediaItem.caption = caption;
+        mediaItem.parse_mode = "Markdown";
+      }
+      return mediaItem;
+    });
+
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        media: mediaPayload
+      })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.warn("[Telegram sendMediaGroup Error, falling back to single media/message split]:", errText);
+      
+      const firstItem = truncatedMedia[0];
+      const url = getAbsoluteMediaUrl(firstItem);
+      if (isVideoUrl(url)) {
+        await sendTelegramVideo(chatId, url, caption, token);
+      } else {
+        await sendTelegramPhoto(chatId, url, caption, token);
+      }
+      
+      if (truncatedMedia.length > 1) {
+        for (let i = 1; i < truncatedMedia.length; i++) {
+          const itemUrl = getAbsoluteMediaUrl(truncatedMedia[i]);
+          if (isVideoUrl(itemUrl)) {
+            await sendTelegramVideo(chatId, itemUrl, "", token);
+          } else {
+            await sendTelegramPhoto(chatId, itemUrl, "", token);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Failed to send media group to Telegram:", err);
+    await sendTelegramMessage(chatId, caption, token);
   }
 }
 
