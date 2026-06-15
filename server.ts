@@ -205,8 +205,9 @@ app.get("/api/telegram-info", async (req, res) => {
   let enabled = true;
   let forwardChatId = "";
   try {
-    const docSnap = await adminDb.collection("settings").doc("telegram").get();
-    if (docSnap.exists) {
+    await getClientAuth();
+    const docSnap = await getDoc(doc(db, "settings", "telegram"));
+    if (docSnap.exists()) {
       const data = docSnap.data();
       if (data) {
         if (typeof data.enabled === "boolean") {
@@ -262,8 +263,9 @@ app.post("/api/telegram-toggle", async (req, res) => {
   }
 
   try {
-    // 1. Update Firestore settings using Admin SDK
-    await adminDb.collection("settings").doc("telegram").set({ enabled }, { merge: true });
+    // 1. Update Firestore settings using Client SDK
+    await getClientAuth();
+    await setDoc(doc(db, "settings", "telegram"), { enabled }, { merge: true });
 
     // 2. Based on state, set or delete webhook
     const appUrl = process.env.APP_URL;
@@ -298,7 +300,8 @@ app.post("/api/telegram-save-config", async (req, res) => {
   }
 
   try {
-    await adminDb.collection("settings").doc("telegram").set({ forwardChatId: forwardChatId.trim() }, { merge: true });
+    await getClientAuth();
+    await setDoc(doc(db, "settings", "telegram"), { forwardChatId: forwardChatId.trim() }, { merge: true });
     return res.json({ ok: true, message: "Target Chat ID berhasil diperbarui." });
   } catch (err: any) {
     console.error("Error saving telegram forwardChatId config:", err);
@@ -320,8 +323,9 @@ app.post("/api/telegram-forward", async (req, res) => {
 
   try {
     // 1. Fetch Integration Settings
-    const settingsSnap = await adminDb.collection("settings").doc("telegram").get();
-    const settings = settingsSnap.exists ? settingsSnap.data() : null;
+    await getClientAuth();
+    const settingsSnap = await getDoc(doc(db, "settings", "telegram"));
+    const settings = settingsSnap.exists() ? settingsSnap.data() : null;
 
     if (!settings || settings?.enabled === false) {
       return res.status(400).json({ ok: false, error: "Integrasi Bot Telegram belum diaktifkan di setelan." });
@@ -333,8 +337,8 @@ app.post("/api/telegram-forward", async (req, res) => {
     }
 
     // 2. Fetch the corresponding site building record
-    const buildingSnap = await adminDb.collection("buildings").doc(buildingId).get();
-    if (!buildingSnap.exists) {
+    const buildingSnap = await getDoc(doc(db, "buildings", buildingId));
+    if (!buildingSnap.exists()) {
       return res.status(404).json({ ok: false, error: "Rekaman situs tidak ditemukan." });
     }
 
@@ -614,8 +618,9 @@ async function getTelegramSession(chatId: string | number): Promise<any> {
     return authenticatedSessions[cidStr];
   }
   try {
-    const docSnap = await adminDb.collection("telegram_sessions").doc(cidStr).get();
-    if (docSnap.exists) {
+    await getClientAuth();
+    const docSnap = await getDoc(doc(db, "telegram_sessions", cidStr));
+    if (docSnap.exists()) {
       const data = docSnap.data();
       authenticatedSessions[cidStr] = data;
       return data;
@@ -790,12 +795,14 @@ async function processMediaGroup(group: PendingMediaGroup, token: string) {
     // Set the complete group's gallery list
     parsedRecord.gallery = mediaUrls;
 
-    // Save record in Firestore using Admin SDK
+    // Save record in Firestore using Client SDK
     const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    await adminDb.collection("buildings").doc(finalRecordId).set({
+    await getClientAuth();
+    const buildingRef = doc(db, "buildings", finalRecordId);
+    await setDoc(buildingRef, {
       ...parsedRecord,
-      updatedAt: FieldValue.serverTimestamp(),
-      createdAt: FieldValue.serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      createdAt: serverTimestamp(),
       createdBy: activeSession.userUid || "telegram_" + chatId
     });
 
@@ -847,7 +854,8 @@ async function handleTelegramUpdate(update: any, token: string) {
 
   // Language Selection Actions (triggered from keyboard buttons or manually)
   if (text === "🇮🇩 Bahasa Indonesia" || text === "/lang_id") {
-    await adminDb.collection("telegram_sessions").doc(String(chatId)).set({ lang: "id" }, { merge: true });
+    await getClientAuth();
+    await setDoc(doc(db, "telegram_sessions", String(chatId)), { lang: "id" }, { merge: true });
     
     // Update local memory cache helper
     if (authenticatedSessions[String(chatId)]) {
@@ -870,7 +878,8 @@ Ketik
   }
 
   if (text === "🇨🇳 中文" || text === "/lang_zh") {
-    await adminDb.collection("telegram_sessions").doc(String(chatId)).set({ lang: "zh" }, { merge: true });
+    await getClientAuth();
+    await setDoc(doc(db, "telegram_sessions", String(chatId)), { lang: "zh" }, { merge: true });
     
     // Update local memory cache helper
     if (authenticatedSessions[String(chatId)]) {
@@ -921,22 +930,26 @@ Ketik
     let categoryFound: 'surveyor' | 'admin' = 'surveyor';
 
     try {
-      // Look up in surveyors standard query from Admin SDK
-      const snapSurveyorEmail = await adminDb.collection("surveyors").where("email", "==", input).get();
+      await getClientAuth();
+      // Look up in surveyors standard query from Client SDK
+      const qEmail = query(collection(db, "surveyors"), where("email", "==", input));
+      const snapSurveyorEmail = await getDocs(qEmail);
       if (!snapSurveyorEmail.empty) {
         matchedSurveyor = snapSurveyorEmail.docs[0].data();
         matchedSurveyorId = snapSurveyorEmail.docs[0].id;
       } else {
-        const snapSurveyorPhone = await adminDb.collection("surveyors").where("phone", "==", input).get();
+        const qPhone = query(collection(db, "surveyors"), where("phone", "==", input));
+        const snapSurveyorPhone = await getDocs(qPhone);
         if (!snapSurveyorPhone.empty) {
           matchedSurveyor = snapSurveyorPhone.docs[0].data();
           matchedSurveyorId = snapSurveyorPhone.docs[0].id;
         }
       }
 
-      // If not found, look up in admins standard query from Admin SDK
+      // If not found, look up in admins standard query from Client SDK
       if (!matchedSurveyor) {
-        const snapAdminEmail = await adminDb.collection("admins").where("email", "==", input).get();
+        const qAdmin = query(collection(db, "admins"), where("email", "==", input));
+        const snapAdminEmail = await getDocs(qAdmin);
         if (!snapAdminEmail.empty) {
           matchedSurveyor = snapAdminEmail.docs[0].data();
           matchedSurveyorId = snapAdminEmail.docs[0].id;
@@ -946,15 +959,16 @@ Ketik
 
       if (matchedSurveyor) {
         const name = matchedSurveyor.name || "Staff";
-        // Save the Telegram mapping into firestore for persistence via Admin SDK
-        await adminDb.collection("telegram_sessions").doc(String(chatId)).set({
+        // Save the Telegram mapping into firestore for persistence via Client SDK
+        const sessionRef = doc(db, "telegram_sessions", String(chatId));
+        await setDoc(sessionRef, {
           chatId,
           name,
           email: matchedSurveyor.email || "",
           phone: matchedSurveyor.phone || "",
           role: categoryFound,
           userUid: matchedSurveyorId,
-          linkedAt: FieldValue.serverTimestamp()
+          linkedAt: serverTimestamp()
         }, { merge: true });
 
         // Update local memory cache
@@ -1089,12 +1103,14 @@ ${lang === "zh" ? "现在，您发送给此机器人的每张照片或视频都�
       // Set the uploaded gallery file
       parsedRecord.gallery = [mediaUrl];
 
-      // Save record in Firestore via Admin SDK
+      // Save record in Firestore via Client SDK
       const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-      await adminDb.collection("buildings").doc(finalRecordId).set({
+      await getClientAuth();
+      const buildingRef = doc(db, "buildings", finalRecordId);
+      await setDoc(buildingRef, {
         ...parsedRecord,
-        updatedAt: FieldValue.serverTimestamp(),
-        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp(),
         createdBy: activeSession.userUid || "telegram_" + chatId
       });
 
@@ -1427,10 +1443,11 @@ async function startServer() {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const appUrl = process.env.APP_URL;
     if (token && token !== "YOUR_TELEGRAM_BOT_TOKEN" && appUrl && appUrl !== "MY_APP_URL") {
-      adminDb.collection("settings").doc("telegram").get()
+      getClientAuth()
+        .then(() => getDoc(doc(db, "settings", "telegram")))
         .then((docSnap) => {
           let enabled = true;
-          if (docSnap.exists) {
+          if (docSnap.exists()) {
             const data = docSnap.data();
             if (data && typeof data.enabled === "boolean") {
               enabled = data.enabled;
