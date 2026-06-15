@@ -18,6 +18,11 @@ export default function BuildingDetail({ building, isAdmin, onClose, onEdit, onD
   const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const [isMuted, setIsMuted] = useState(true);
   
+  // Forwarding to Telegram states
+  const [isForwarding, setIsForwarding] = useState(false);
+  const [forwardSuccess, setForwardSuccess] = useState(false);
+  const [forwardError, setForwardError] = useState<string | null>(null);
+
   const t = translations[lang];
 
   const mediaItems = building.gallery && building.gallery.length > 0 
@@ -30,6 +35,30 @@ export default function BuildingDetail({ building, isAdmin, onClose, onEdit, onD
 
   const prevMedia = () => {
     setCurrentMediaIndex((prev) => (prev - 1 + mediaItems.length) % mediaItems.length);
+  };
+
+  const handleForwardToTelegram = async () => {
+    setIsForwarding(true);
+    setForwardSuccess(false);
+    setForwardError(null);
+    try {
+      const res = await fetch('/api/telegram-forward', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ buildingId: building.id })
+      });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        setForwardSuccess(true);
+        setTimeout(() => setForwardSuccess(false), 5000);
+      } else {
+        setForwardError(data.error || 'Gagal mengirimkan laporan.');
+      }
+    } catch (err: any) {
+      setForwardError(err.message || 'Gagal menghubungi server.');
+    } finally {
+      setIsForwarding(false);
+    }
   };
 
   const activeMedia = mediaItems[currentMediaIndex];
@@ -284,11 +313,65 @@ export default function BuildingDetail({ building, isAdmin, onClose, onEdit, onD
               {t.descStr}
             </h3>
             <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-line bg-slate-50 p-4 rounded-xl border border-slate-100">
-              {building.description || lang === 'id' ? 'Tidak ada penjelasan tertulis.' : '暂无详细描述描述。'}
+              {building.description || (lang === 'id' ? 'Tidak ada penjelasan tertulis.' : '暂无详细描述描述。')}
             </p>
           </div>
 
+          {/* TELEGRAM FORWARDING BLOCK */}
+          <div className="flex flex-col gap-3 bg-blue-50/20 border border-blue-50 p-4 rounded-xl">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-xs font-extrabold uppercase tracking-widest text-slate-500 flex items-center gap-1.5">
+                <Send className="w-4 h-4 text-sky-500" />
+                {lang === 'id' ? 'FORWARD KE TELEGRAM' : 'TELEGRAM 机器人转发'}
+              </h3>
+              <span className="text-[10px] font-mono text-slate-400 uppercase font-bold tracking-wider">
+                {lang === 'id' ? 'Proses Instan' : '实时推送'}
+              </span>
+            </div>
 
+            <p className="text-xs text-slate-500 leading-relaxed">
+              {lang === 'id'
+                ? 'Teruskan detail lengkap rekap data situs ini langsung ke grup, channel atau chat ID Telegram yang telah dikonfigurasi.'
+                : '将此站点的详细采集指标一键推送至在电报设置中配置的目标 Chat ID 会话。'}
+            </p>
+
+            <div className="flex flex-col gap-2 mt-1">
+              <button
+                type="button"
+                disabled={isForwarding}
+                onClick={handleForwardToTelegram}
+                className="w-full h-10 bg-sky-500 hover:bg-sky-600 text-white text-xs font-black rounded-lg transition flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-60"
+              >
+                {isForwarding ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {lang === 'id' ? 'Meneruskan data...' : '正在转发至 Telegram...'}
+                  </>
+                ) : (
+                  <>
+                    <Send className="w-4 h-4 animate-bounce" />
+                    {lang === 'id' ? 'Kirim Sekarang ke Telegram' : '🚀 立即发送至 Telegram'}
+                  </>
+                )}
+              </button>
+
+              {forwardSuccess && (
+                <div className="bg-emerald-50 text-emerald-800 border border-emerald-100 p-3 rounded-lg text-xs font-extrabold flex items-center gap-2 animate-fade-in">
+                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    {lang === 'id' ? 'Berhasil dikirim ke Telegram!' : '已成功发送至 Telegram!'}
+                  </span>
+                </div>
+              )}
+
+              {forwardError && (
+                <div className="bg-rose-50 text-rose-800 border border-rose-100 p-3 rounded-lg text-xs font-semibold flex items-center gap-2 animate-fade-in">
+                  <X className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{forwardError}</span>
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* Copy and Export tools at the footer bottom */}
           <div className="bg-slate-900 text-white p-4 rounded-xl flex items-center justify-between gap-4 mt-auto">
