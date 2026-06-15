@@ -42,55 +42,128 @@ try {
   adminDb = getFirestore();
 }
 
+// Sync bot and admin user records via Admin Auth SDK as safe bootstrap step
+async function syncBotUser() {
+  try {
+    const adminAuth = getAuth();
+    try {
+      const user = await adminAuth.getUserByEmail("telegram-bot-service@lxvoip.com");
+      console.log("[Firebase Admin Auth] Existing bot user found, updating password to ensure sync...");
+      await adminAuth.updateUser(user.uid, {
+        password: "botpassword123"
+      });
+      console.log("[Firebase Admin Auth] Bot user password synchronized successfully");
+    } catch (getErr: any) {
+      if (getErr.code === "auth/user-not-found") {
+        console.log("[Firebase Admin Auth] Bot user not found, creating new one...");
+        await adminAuth.createUser({
+          email: "telegram-bot-service@lxvoip.com",
+          password: "botpassword123",
+          emailVerified: true
+        });
+        console.log("[Firebase Admin Auth] Bot user created successfully via Admin SDK");
+      } else {
+        throw getErr;
+      }
+    }
+  } catch (err: any) {
+    console.warn("[Firebase Admin Auth] Could not sync bot user with Admin SDK (this is normal if API/IAM credentials are restricted):", err.message || err);
+  }
+
+  try {
+    const adminAuth = getAuth();
+    try {
+      const user = await adminAuth.getUserByEmail("admin@admin.com");
+      console.log("[Firebase Admin Auth] Existing admin fallback user found, updating password to ensure sync...");
+      await adminAuth.updateUser(user.uid, {
+        password: "admin123"
+      });
+      console.log("[Firebase Admin Auth] Admin fallback user password synchronized successfully");
+    } catch (getErr: any) {
+      if (getErr.code === "auth/user-not-found") {
+        console.log("[Firebase Admin Auth] Admin fallback user not found, creating new one...");
+        await adminAuth.createUser({
+          email: "admin@admin.com",
+          password: "admin123",
+          emailVerified: true
+        });
+        console.log("[Firebase Admin Auth] Admin fallback user created successfully via Admin SDK");
+      } else {
+        throw getErr;
+      }
+    }
+  } catch (err: any) {
+    console.warn("[Firebase Admin Auth] Could not sync admin fallback user with Admin SDK:", err.message || err);
+  }
+}
+
+// Fire off the sync in background
+syncBotUser();
+
+let authPromise: Promise<any> | null = null;
+
 // Ensure client SDK is authenticated to perform storage uploads
 async function getClientAuth() {
   if (auth.currentUser) {
     return auth.currentUser;
   }
-  try {
-    const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
-    console.log("[Firebase Client Auth] Authenticated telegram-bot-service successfully");
-    return userCred.user;
-  } catch (err: any) {
-    if (err.code === "auth/user-not-found" || err.code === "auth/invalid-credential") {
-      try {
-        const userCred = await createUserWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
-        console.log("[Firebase Client Auth] Created and authenticated telegram-bot-service");
-        return userCred.user;
-      } catch (createErr) {
-        console.warn("[Firebase Client Auth] Failed to create telegram-bot-service account (might already exist):", createErr);
+  if (authPromise) {
+    return authPromise;
+  }
+
+  authPromise = (async () => {
+    try {
+      const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+      console.log("[Firebase Client Auth] Authenticated telegram-bot-service successfully");
+      return userCred.user;
+    } catch (err: any) {
+      if (err.code === "auth/user-not-found" || err.code === "auth/invalid-credential" || err.code === "auth/wrong-password") {
         try {
-          const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+          const userCred = await createUserWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+          console.log("[Firebase Client Auth] Created and authenticated telegram-bot-service");
           return userCred.user;
-        } catch (retryErr) {
-          console.warn("[Firebase Client Auth] Bot service retry signin failed:", retryErr);
+        } catch (createErr: any) {
+          console.warn("[Firebase Client Auth] Failed to create telegram-bot-service account:", createErr.message || createErr);
+          try {
+            const userCred = await signInWithEmailAndPassword(auth, "telegram-bot-service@lxvoip.com", "botpassword123");
+            return userCred.user;
+          } catch (retryErr: any) {
+            console.warn("[Firebase Client Auth] Bot service retry signin failed:", retryErr.message || retryErr);
+          }
         }
+      } else {
+        console.warn("[Firebase Client Auth] Tried to authenticate but got error:", err.message || err);
       }
-    } else {
-      console.warn("[Firebase Client Auth] Tried to authenticate but got error:", err);
     }
-  }
 
-  // Fallback to demo admin account
+    // Fallback to demo admin account
+    try {
+      const userCred = await signInWithEmailAndPassword(auth, "admin@admin.com", "admin123");
+      console.log("[Firebase Client Auth] Authenticated as admin fallback successfully");
+      return userCred.user;
+    } catch (adminErr: any) {
+      if (adminErr.code === "auth/user-not-found" || adminErr.code === "auth/invalid-credential" || adminErr.code === "auth/wrong-password") {
+        try {
+          const userCred = await createUserWithEmailAndPassword(auth, "admin@admin.com", "admin123");
+          console.log("[Firebase Client Auth] Created and authenticated demo admin account");
+          return userCred.user;
+        } catch (createAdminErr: any) {
+          console.warn("[Firebase Client Auth] Admin fallback create failed:", createAdminErr.message || createAdminErr);
+        }
+      } else {
+        console.warn("[Firebase Client Auth] Failed to log in as admin fallback:", adminErr.message || adminErr);
+      }
+    }
+
+    return null;
+  })();
+
   try {
-    const userCred = await signInWithEmailAndPassword(auth, "admin@admin.com", "admin123");
-    console.log("[Firebase Client Auth] Authenticated as admin fallback successfully");
-    return userCred.user;
-  } catch (adminErr: any) {
-    if (adminErr.code === "auth/user-not-found" || adminErr.code === "auth/invalid-credential") {
-      try {
-        const userCred = await createUserWithEmailAndPassword(auth, "admin@admin.com", "admin123");
-        console.log("[Firebase Client Auth] Created and authenticated demo admin account");
-        return userCred.user;
-      } catch (createAdminErr) {
-        console.warn("[Firebase Client Auth] Admin fallback create failed:", createAdminErr);
-      }
-    } else {
-      console.warn("[Firebase Client Auth] Failed to log in as admin fallback:", adminErr);
-    }
+    const user = await authPromise;
+    return user;
+  } finally {
+    authPromise = null;
   }
-
-  return null;
 }
 
 const app = express();
@@ -120,13 +193,19 @@ app.get("/api/telegram-info", async (req, res) => {
 
   // Get current state from Firestore
   let enabled = true;
+  let forwardChatId = "";
   try {
     await getClientAuth();
     const docSnap = await getDoc(doc(db, "settings", "telegram"));
     if (docSnap.exists()) {
       const data = docSnap.data();
-      if (data && typeof data.enabled === "boolean") {
-        enabled = data.enabled;
+      if (data) {
+        if (typeof data.enabled === "boolean") {
+          enabled = data.enabled;
+        }
+        if (typeof data.forwardChatId === "string") {
+          forwardChatId = data.forwardChatId;
+        }
       }
     }
   } catch (err) {
@@ -143,7 +222,8 @@ app.get("/api/telegram-info", async (req, res) => {
         botFirstName: data.result.first_name,
         instructionsUrl: process.env.APP_URL || "http://localhost:3000",
         message: "Telegram Bot is active.",
-        enabled: enabled
+        enabled: enabled,
+        forwardChatId: forwardChatId
       });
     }
   } catch (err) {
@@ -155,7 +235,8 @@ app.get("/api/telegram-info", async (req, res) => {
     botUsername: "Bot",
     instructionsUrl: process.env.APP_URL || "http://localhost:3000",
     message: "Telegram Bot is active.",
-    enabled: enabled
+    enabled: enabled,
+    forwardChatId: forwardChatId
   });
 });
 
@@ -172,7 +253,7 @@ app.post("/api/telegram-toggle", async (req, res) => {
   }
 
   try {
-    // 1. Update Firestore settings using client SDK
+    // 1. Update Firestore settings using Client SDK
     await getClientAuth();
     await setDoc(doc(db, "settings", "telegram"), { enabled }, { merge: true });
 
@@ -198,6 +279,111 @@ app.post("/api/telegram-toggle", async (req, res) => {
   } catch (err: any) {
     console.error("Error toggling telegram bot:", err);
     return res.status(500).json({ ok: false, error: err.message || "Failed to toggle bot state" });
+  }
+});
+
+// Endpoint to update target Group/Channel/Chat ID from Admin Panel
+app.post("/api/telegram-save-config", async (req, res) => {
+  const { forwardChatId } = req.body;
+  if (typeof forwardChatId !== "string") {
+    return res.status(400).json({ ok: false, error: "Parameter forwardChatId wajib berupa string." });
+  }
+
+  try {
+    await getClientAuth();
+    await setDoc(doc(db, "settings", "telegram"), { forwardChatId: forwardChatId.trim() }, { merge: true });
+    return res.json({ ok: true, message: "Target Chat ID berhasil diperbarui." });
+  } catch (err: any) {
+    console.error("Error saving telegram forwardChatId config:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Gagal menyimpan konfigurasi Chat ID." });
+  }
+});
+
+// Endpoint to forward building data record on demand to configured Telegram chat
+app.post("/api/telegram-forward", async (req, res) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token || token === "YOUR_TELEGRAM_BOT_TOKEN") {
+    return res.status(400).json({ ok: false, error: "Token Telegram belum dikonfigurasi di server." });
+  }
+
+  const { buildingId } = req.body;
+  if (!buildingId) {
+    return res.status(400).json({ ok: false, error: "Parameter buildingId tidak boleh kosong." });
+  }
+
+  try {
+    // 1. Fetch Integration Settings
+    await getClientAuth();
+    const settingsSnap = await getDoc(doc(db, "settings", "telegram"));
+    const settings = settingsSnap.exists() ? settingsSnap.data() : null;
+
+    if (!settings || settings?.enabled === false) {
+      return res.status(400).json({ ok: false, error: "Integrasi Bot Telegram belum diaktifkan di setelan." });
+    }
+
+    const forwardChatId = settings?.forwardChatId;
+    if (!forwardChatId || forwardChatId.trim() === "") {
+      return res.status(400).json({ ok: false, error: "Target Chat ID Telegram belum diatur. Silakan atur di bagian Setelan Bot Telegram terlebih dahulu." });
+    }
+
+    // 2. Fetch the corresponding site building record
+    const buildingSnap = await getDoc(doc(db, "buildings", buildingId));
+    if (!buildingSnap.exists()) {
+      return res.status(404).json({ ok: false, error: "Rekaman situs tidak ditemukan." });
+    }
+
+    const building = buildingSnap.data() as any;
+
+    // 3. Format message in Indonesian and Chinese
+    let categoryLabel = building.category || "";
+    if (categoryLabel === "survey") categoryLabel = "踩点 / SURVEY";
+    else if (categoryLabel === "line") categoryLabel = "排线 / LINE";
+    else if (categoryLabel === "installation") categoryLabel = "安装 / INSTALLATION";
+    else categoryLabel = categoryLabel.toUpperCase();
+
+    let techSpecs = "";
+    if (building.category === "survey") {
+      techSpecs = `• 长途线路数量 (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• 本地线路数量 (Local Lines): *${building.localLines || 0}* 根`;
+    } else if (building.category === "line") {
+      techSpecs = `• 长途电话数量 (Long Distance Phones): *${building.longDistancePhones || 0}* 台\n• 本地电话数量 (Local Phones): *${building.localPhones || 0}* 台`;
+    } else if (building.category === "installation") {
+      techSpecs = `• Jalur Jauh (Long Distance Lines): *${building.longDistanceLines || 0}* 根\n• Jalur Lokal (Local Lines): *${building.localLines || 0}* 根\n• 总时长 (Total Duration): *${building.totalDuration || 0}* 小时`;
+    }
+
+    const descText = building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。";
+
+    const textPayload = `🏢 *${building.name || "Situs Tanpa Nama"}*
+
+📌 *Kategori / 类别*: [${categoryLabel}]
+👤 *Operator / 操作人*: ${building.operator || "N/A"}
+⏰ *Waktu / 操作时间*: ${building.operationTime || "N/A"}
+📍 *Lokasi / 地点*: ${building.location || "N/A"}
+
+🔌 *Spesifikasi Metrik Teknis / 技术指标*:
+${techSpecs}
+
+📝 *Keterangan Lapangan / 描述*:
+${descText}
+
+📋 _Dikirim langsung dari LXVOIP Web Admin Portal_`;
+
+    // 4. Send with Photo if gallery contains any image URLs
+    let photoUrl = "";
+    if (building.gallery && building.gallery.length > 0) {
+      const firstMedia = building.gallery[0];
+      photoUrl = typeof firstMedia === "string" ? firstMedia : (firstMedia?.url || "");
+    }
+
+    if (photoUrl && photoUrl.startsWith("http")) {
+      await sendTelegramPhoto(forwardChatId, photoUrl, textPayload, token);
+    } else {
+      await sendTelegramMessage(forwardChatId, textPayload, token);
+    }
+
+    return res.json({ ok: true, message: "Berhasil dteruskan ke Telegram!", targetChatId: forwardChatId });
+  } catch (err: any) {
+    console.error("Failed to forward building to telegram:", err);
+    return res.status(500).json({ ok: false, error: err.message || "Gagal mengirimkan data ke Telegram." });
   }
 });
 
