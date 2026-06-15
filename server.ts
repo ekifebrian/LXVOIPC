@@ -136,6 +136,7 @@ app.get("/api/telegram-info", async (req, res) => {
   let enabled = true;
   let forwardChatId = "";
   try {
+    await getClientAuth();
     const docSnap = await getDoc(doc(db, "settings", "telegram"));
     if (docSnap.exists()) {
       const data = docSnap.data();
@@ -194,6 +195,7 @@ app.post("/api/telegram-toggle", async (req, res) => {
 
   try {
     // 1. Update Firestore settings using Client SDK
+    await getClientAuth();
     await setDoc(doc(db, "settings", "telegram"), { enabled }, { merge: true });
 
     // 2. Based on state, set or delete webhook
@@ -229,6 +231,7 @@ app.post("/api/telegram-save-config", async (req, res) => {
   }
 
   try {
+    await getClientAuth();
     await setDoc(doc(db, "settings", "telegram"), { forwardChatId: forwardChatId.trim() }, { merge: true });
     return res.json({ ok: true, message: "Target Chat ID berhasil diperbarui." });
   } catch (err: any) {
@@ -251,6 +254,7 @@ app.post("/api/telegram-forward", async (req, res) => {
 
   try {
     // 1. Fetch Integration Settings
+    await getClientAuth();
     const settingsSnap = await getDoc(doc(db, "settings", "telegram"));
     const settings = settingsSnap.exists() ? settingsSnap.data() : null;
 
@@ -545,6 +549,7 @@ async function getTelegramSession(chatId: string | number): Promise<any> {
     return authenticatedSessions[cidStr];
   }
   try {
+    await getClientAuth();
     const docSnap = await getDoc(doc(db, "telegram_sessions", cidStr));
     if (docSnap.exists()) {
       const data = docSnap.data();
@@ -723,6 +728,7 @@ async function processMediaGroup(group: PendingMediaGroup, token: string) {
 
     // Save record in Firestore using Client SDK
     const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    await getClientAuth();
     await setDoc(doc(db, "buildings", finalRecordId), {
       ...parsedRecord,
       updatedAt: serverTimestamp(),
@@ -778,6 +784,7 @@ async function handleTelegramUpdate(update: any, token: string) {
 
   // Language Selection Actions (triggered from keyboard buttons or manually)
   if (text === "🇮🇩 Bahasa Indonesia" || text === "/lang_id") {
+    await getClientAuth();
     await setDoc(doc(db, "telegram_sessions", String(chatId)), { lang: "id" }, { merge: true });
     
     // Update local memory cache helper
@@ -801,6 +808,7 @@ Ketik
   }
 
   if (text === "🇨🇳 中文" || text === "/lang_zh") {
+    await getClientAuth();
     await setDoc(doc(db, "telegram_sessions", String(chatId)), { lang: "zh" }, { merge: true });
     
     // Update local memory cache helper
@@ -852,6 +860,7 @@ Ketik
     let categoryFound: 'surveyor' | 'admin' = 'surveyor';
 
     try {
+      await getClientAuth();
       // Look up in surveyors standard query from Client SDK
       const snapSurveyorEmail = await getDocs(query(collection(db, "surveyors"), where("email", "==", input)));
       if (!snapSurveyorEmail.empty) {
@@ -878,6 +887,7 @@ Ketik
       if (matchedSurveyor) {
         const name = matchedSurveyor.name || "Staff";
         // Save the Telegram mapping into firestore for persistence via Client SDK
+        await getClientAuth();
         await setDoc(doc(db, "telegram_sessions", String(chatId)), {
           chatId,
           name,
@@ -1022,6 +1032,7 @@ ${lang === "zh" ? "现在，您发送给此机器人的每张照片或视频都�
 
       // Save record in Firestore via Client SDK
       const finalRecordId = `datacenter_telegram_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      await getClientAuth();
       await setDoc(doc(db, "buildings", finalRecordId), {
         ...parsedRecord,
         updatedAt: serverTimestamp(),
@@ -1358,7 +1369,8 @@ async function startServer() {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const appUrl = process.env.APP_URL;
     if (token && token !== "YOUR_TELEGRAM_BOT_TOKEN" && appUrl && appUrl !== "MY_APP_URL") {
-      getDoc(doc(db, "settings", "telegram"))
+      getClientAuth()
+        .then(() => getDoc(doc(db, "settings", "telegram")))
         .then((docSnap) => {
           let enabled = true;
           if (docSnap.exists()) {
