@@ -218,6 +218,9 @@ export default function App() {
   const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
   const [editingBuilding, setEditingBuilding] = useState<Building | null>(null);
 
+  // One-time startup state to remember a record ID from URL
+  const [initialUrlRecordId, setInitialUrlRecordId] = useState<string | null>(null);
+
   // Map state selectors
   const [mapZoom, setMapZoom] = useState(1);
   const [selectedMapPoint, setSelectedMapPoint] = useState<Building | null>(null);
@@ -381,6 +384,80 @@ export default function App() {
     const raw = dbBuildings.length > 0 ? dbBuildings : REAL_DEMO_RECORDS;
     return raw.filter((item) => !deletedDemoIds.includes(item.id));
   }, [dbBuildings, deletedDemoIds, user]);
+
+  // 1. Synchronize URL query parameters into React app state on initial load & layout changes
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlTab = params.get('tab');
+    const urlRecordId = params.get('record');
+
+    if (urlTab) {
+      setSidebarTab(urlTab);
+    }
+    if (urlRecordId) {
+      setInitialUrlRecordId(urlRecordId);
+    }
+
+    // Capture standard popstate event (e.g. user goes Back / Forward in browser)
+    const handlePopState = () => {
+      const currentParams = new URLSearchParams(window.location.search);
+      const poppedTab = currentParams.get('tab');
+      const poppedRecordId = currentParams.get('record');
+
+      if (poppedTab) {
+        setSidebarTab(poppedTab);
+      } else {
+        setSidebarTab(user ? 'dashboard' : 'login');
+      }
+
+      if (!poppedRecordId) {
+        setSelectedBuilding(null);
+      } else {
+        setInitialUrlRecordId(poppedRecordId);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [user]);
+
+  // 2. Automatically select record when activeRecords gets populated
+  useEffect(() => {
+    if (initialUrlRecordId && activeRecords.length > 0) {
+      const found = activeRecords.find(item => item.id === initialUrlRecordId);
+      if (found) {
+        setSelectedBuilding(found);
+        setInitialUrlRecordId(null); // Clear once loaded
+      }
+    }
+  }, [activeRecords, initialUrlRecordId]);
+
+  // 3. Synchronize state changes BACK to URL query parameters
+  useEffect(() => {
+    const currentParams = new URLSearchParams(window.location.search);
+    const prevTab = currentParams.get('tab');
+    const prevRecordId = currentParams.get('record');
+
+    const nextTab = sidebarTab;
+    const nextRecordId = selectedBuilding?.id || null;
+
+    if (prevTab !== nextTab || prevRecordId !== nextRecordId) {
+      const newParams = new URLSearchParams();
+      if (nextTab && nextTab !== 'login') {
+        newParams.set('tab', nextTab);
+      }
+      if (nextRecordId) {
+        newParams.set('record', nextRecordId);
+      }
+
+      const queryString = newParams.toString();
+      const newUrl = `${window.location.pathname}${queryString ? `?${queryString}` : ''}`;
+      
+      window.history.pushState({ tab: nextTab, record: nextRecordId }, '', newUrl);
+    }
+  }, [sidebarTab, selectedBuilding]);
 
   // Convert activeRecords into lat/lng and then project into % percentages to plot on SVG accurately
   const plottedPreviewPoints = useMemo(() => {

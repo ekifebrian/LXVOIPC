@@ -22,7 +22,8 @@ import {
   Check,
   Sparkles,
   Mic,
-  ChevronLeft
+  ChevronLeft,
+  EyeOff
 } from 'lucide-react';
 
 interface InteractiveMapProps {
@@ -245,6 +246,7 @@ export default function InteractiveMap({
   // Search input state
   const [mapSearchQuery, setMapSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
+  const [isSearchPanelCollapsed, setIsSearchPanelCollapsed] = useState(false);
 
   // Searched target location (GPS pinpoint marker state for global searches)
   const [searchedLocation, setSearchedLocation] = useState<{
@@ -1175,7 +1177,7 @@ export default function InteractiveMap({
         </div>
 
         {/* Floating Map Search Overlay - Highly detailed premium sidebar design matching the reference image exactly */}
-        {mapMode === 'interactive' && (
+        {mapMode === 'interactive' && !isSearchPanelCollapsed && (
           <div 
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
@@ -1185,24 +1187,14 @@ export default function InteractiveMap({
             {/* Search Input Panel Header */}
             <div className="p-3 border-b border-slate-100/80 bg-slate-50/50 flex flex-col gap-2.5">
               <div className="flex items-center gap-2">
-                {/* Back button resets searches */}
+                {/* Sembunyikan Pencarian (Hide) Button */}
                 <button
                   type="button"
-                  onClick={() => {
-                    setMapSearchQuery('');
-                    setOnlineSearchResults([]);
-                    setShowSearchResults(false);
-                    setSearchedLocation(null);
-                    setActiveRouting(null);
-                    setRoutingInfo(null);
-                    setSelectedSubPOI(null);
-                    setIsDeepSearching(false);
-                    setDeepSearchAnalysis(null);
-                  }}
+                  onClick={() => setIsSearchPanelCollapsed(true)}
                   className="p-1.5 hover:bg-slate-200 text-slate-500 hover:text-slate-800 rounded-lg transition cursor-pointer shrink-0"
-                  title={lang === 'id' ? 'Kembali' : '返回/清空重置'}
+                  title={lang === 'id' ? 'Sembunyikan Pencarian' : '隐藏搜索面板'}
                 >
-                  <ChevronLeft className="w-5 h-5 stroke-[2.5]" />
+                  <EyeOff className="w-5 h-5" />
                 </button>
 
                 {/* Main autocompleting input box */}
@@ -1506,6 +1498,19 @@ export default function InteractiveMap({
               )}
             </div>
           </div>
+        )}
+
+        {/* Floating trigger to restore search panel when collapsed */}
+        {mapMode === 'interactive' && isSearchPanelCollapsed && (
+          <button
+            type="button"
+            onClick={() => setIsSearchPanelCollapsed(false)}
+            className="absolute top-4 left-4 z-40 bg-white/95 hover:bg-slate-50 text-blue-600 border border-slate-200 rounded-xl px-4 py-3 shadow-lg hover:shadow-xl active:scale-95 transition-all text-xs font-black cursor-pointer flex items-center justify-center gap-2"
+            title={lang === 'id' ? 'Tampilkan Pencarian' : '显示搜索面板'}
+          >
+            <Search className="w-4 h-4 text-emerald-500" />
+            <span className="font-sans">{lang === 'id' ? 'Buka Pencarian' : '打开搜索面板'}</span>
+          </button>
         )}
 
         {/* Floating Navigation HUD Banner representing a real-time GPS direction path */}
