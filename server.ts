@@ -1282,6 +1282,82 @@ async function sendTelegramVideo(chatId: string | number, videoUrl: string, capt
   }
 }
 
+async function resolveMediaItemToBuffer(item: any, baseUrl?: string): Promise<{ buffer: Buffer; filename: string; mimeType: string } | null> {
+  const url = getAbsoluteMediaUrl(item, baseUrl);
+  if (!url) return null;
+
+  const isVideo = isItemVideo(item);
+  let defaultMime = isVideo ? "video/mp4" : "image/jpeg";
+  let defaultExt = isVideo ? "mp4" : "jpg";
+
+  // Case 1: Base64 data URL
+  if (url.startsWith("data:")) {
+    const parts = url.split(",");
+    if (parts.length < 2) return null;
+    const meta = parts[0];
+    const data = parts[1];
+    
+    const mimeMatch = meta.match(/data:([^;]+)/);
+    const mimeType = mimeMatch ? mimeMatch[1] : defaultMime;
+    const isBase64Encoded = meta.includes("base64");
+    
+    try {
+      const buffer = Buffer.from(data, isBase64Encoded ? "base64" : "utf-8");
+      return {
+        buffer,
+        filename: `media.${mimeType.split("/")[1] || defaultExt}`,
+        mimeType
+      };
+    } catch (e) {
+      console.warn("[Media Resolver] Base64 decoding failed:", e);
+      return null;
+    }
+  }
+
+  // Case 2: Local file on disk
+  if (url.includes("/uploads/")) {
+    try {
+      const uParts = url.split("/uploads/");
+      const fileName = uParts[uParts.length - 1].split("?")[0];
+      const localFilePath = path.join(process.cwd(), "uploads", fileName);
+      if (fs.existsSync(localFilePath)) {
+        const buffer = fs.readFileSync(localFilePath);
+        const ext = path.extname(fileName).replace(".", "").toLowerCase();
+        let mimeType = ext === "mp4" ? "video/mp4" : `image/${ext || "jpeg"}`;
+        return {
+          buffer,
+          filename: fileName,
+          mimeType
+        };
+      }
+    } catch (fsErr) {
+      console.warn("[Media Resolver] Failed to read local file:", fsErr);
+    }
+  }
+
+  // Case 3: Remote download
+  try {
+    const response = await fetch(url);
+    if (response.ok) {
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const contentType = response.headers.get("content-type") || defaultMime;
+      
+      let extUrl = url.split("?")[0];
+      let basename = path.basename(extUrl) || `media.${contentType.split("/")[1] || defaultExt}`;
+      return {
+        buffer,
+        filename: basename,
+        mimeType: contentType
+      };
+    }
+  } catch (fetchErr) {
+    console.error(`[Media Resolver] Remote fetch failed for URL: ${url}`, fetchErr);
+  }
+
+  return null;
+}
+
 async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[], caption: string, token: string, parseMode: string = "Markdown", baseUrl?: string) {
   try {
     // Filter and sanitize media items to ensure we don't send empty or invalid items
@@ -1290,76 +1366,162 @@ async function sendTelegramMediaGroup(chatId: string | number, mediaList: any[],
       return url && url.trim() !== "";
     });
 
-    const truncatedMedia = validItems.slice(0, 10);
-    const mediaPayload = truncatedMedia.map((item, index) => {
-      const url = getAbsoluteMediaUrl(item, baseUrl);
-      const isVideo = isItemVideo(item);
-      
-      const mediaItem: any = {
-        type: isVideo ? "video" : "photo",
-        media: url
-      };
-      
-      if (index === 0) {
-        mediaItem.caption = caption;
-        mediaItem.parse_mode = parseMode;
-      }
-      return mediaItem;
-    });
-
-    // 1. Double-stringified JSON is officially required for sendMediaGroup when using Content-Type: application/json
-    let res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        media: JSON.stringify(mediaPayload)
-      })
-    });
-
-    // 2. If double-stringified standard JSON fails, retry raw objects fallback structure
-    if (!res.ok) {
-      const errText = await res.text();
-      console.warn("[Telegram sendMediaGroup double-stringified failed, retrying plain nested array fallback...]:", errText);
-      
-      res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          media: mediaPayload
-        })
-      });
+    if (validItems.length === 0) {
+      await sendTelegramMessage(chatId, caption, token, null, parseMode);
+      return;
     }
 
-    // 3. If BOTH formats failed, fallback sequentially to individual media items
-    if (!res.ok) {
-      const errResultText = await res.text();
-      console.warn("[Telegram sendMediaGroup completely failed, falling back to sequential individual media messages! Response]:", errResultText);
-      
-      const firstItem = truncatedMedia[0];
-      const url = getAbsoluteMediaUrl(firstItem, baseUrl);
-      if (isItemVideo(firstItem)) {
+    if (validItems.length === 1) {
+      const singleMedia = validItems[0];
+      const url = getAbsoluteMediaUrl(singleMedia, baseUrl);
+      if (isItemVideo(singleMedia)) {
         await sendTelegramVideo(chatId, url, caption, token, null, parseMode, baseUrl);
       } else {
         await sendTelegramPhoto(chatId, url, caption, token, null, parseMode, baseUrl);
       }
+      return;
+    }
+
+    // Split validItems list smartly into chunks of 2-10 items (Telegram restricts sendMediaGroup to 2-10 files)
+    // We dynamically adjust chunk sizes so no chunk ends up with exactly 1 file (which is rejected by Telegram)
+    const chunks: any[][] = [];
+    let i = 0;
+    while (i < validItems.length) {
+      const remaining = validItems.length - i;
+      if (remaining === 11) {
+        // Splitting 11 remaining items into 9 and 2 avoids having a subsequent alone chunk of size 1
+        chunks.push(validItems.slice(i, i + 9));
+        chunks.push(validItems.slice(i + 9));
+        break;
+      }
+      const chunkSize = Math.min(10, remaining);
+      chunks.push(validItems.slice(i, i + chunkSize));
+      i += chunkSize;
+    }
+
+    console.log(`[Telegram Group Setup] Processing ${validItems.length} media items split into ${chunks.length} smart chunk(s).`);
+
+    // Process each chunk sequentially
+    for (let cIndex = 0; cIndex < chunks.length; cIndex++) {
+      const chunk = chunks[cIndex];
       
-      if (truncatedMedia.length > 1) {
-        for (let i = 1; i < truncatedMedia.length; i++) {
-          const innerItem = truncatedMedia[i];
-          const itemUrl = getAbsoluteMediaUrl(innerItem, baseUrl);
-          if (isItemVideo(innerItem)) {
-            await sendTelegramVideo(chatId, itemUrl, "", token, null, parseMode, baseUrl);
+      // Determine caption for this specific chunk
+      let chunkCaption = "";
+      if (cIndex === 0) {
+        chunkCaption = caption; // First chunk gets the full technical details
+      } else {
+        // Subsequent chunks get a continuation card so the user knows they are linked to the same record
+        chunkCaption = `🖼️ <b>[Galeri Foto Lanjutan / Continuation - Part ${cIndex + 1}/${chunks.length}]</b>\n\n📌 <i>Sisa foto/video rekaman lapangan dari situs ini.</i>`;
+      }
+
+      let success = false;
+
+      try {
+        // Build actual multi-part form data to upload buffers directly to Telegram
+        const formData = new globalThis.FormData();
+        formData.append("chat_id", String(chatId));
+
+        const mediaPayload: any[] = [];
+
+        for (let idx = 0; idx < chunk.length; idx++) {
+          const item = chunk[idx];
+          const resolved = await resolveMediaItemToBuffer(item, baseUrl);
+          const isVid = isItemVideo(item);
+          const fieldName = `file_${idx}`;
+
+          if (resolved) {
+            // Append binary blob directly to form data. Node 18+ globalThis.Blob is fully supported.
+            const blob = new globalThis.Blob([resolved.buffer], { type: resolved.mimeType });
+            formData.append(fieldName, blob, resolved.filename);
+
+            const mediaItem: any = {
+              type: isVid ? "video" : "photo",
+              media: `attach://${fieldName}`
+            };
+
+            if (idx === 0) {
+              mediaItem.caption = chunkCaption;
+              mediaItem.parse_mode = parseMode;
+            }
+            mediaPayload.push(mediaItem);
           } else {
-            await sendTelegramPhoto(chatId, itemUrl, "", token, null, parseMode, baseUrl);
+            // Fallback to absolute URL if buffer resolution failed
+            const url = getAbsoluteMediaUrl(item, baseUrl);
+            const mediaItem: any = {
+              type: isVid ? "video" : "photo",
+              media: url
+            };
+
+            if (idx === 0) {
+              mediaItem.caption = chunkCaption;
+              mediaItem.parse_mode = parseMode;
+            }
+            mediaPayload.push(mediaItem);
+          }
+        }
+
+        formData.append("media", JSON.stringify(mediaPayload));
+
+        // Submit to Telegram Bot API with multipart stream
+        const res = await fetch(`https://api.telegram.org/bot${token}/sendMediaGroup`, {
+          method: "POST",
+          body: formData
+        });
+
+        if (res.ok) {
+          success = true;
+          console.log(`[Telegram Group Setup] Multipart Chunk ${cIndex + 1}/${chunks.length} of ${chunk.length} media files transferred successfully.`);
+        } else {
+          const errText = await res.text();
+          console.error(`[Telegram sendMediaGroup multipart completely rejected chunk ${cIndex + 1} with error]:`, errText);
+        }
+      } catch (innerErr) {
+        console.error(`[Telegram sendMediaGroup multipart network/transient error for chunk ${cIndex + 1}]:`, innerErr);
+      }
+
+      // Ultimate Fallback: If both group formats fail, transmit items inside this chunk sequentially as individual messages
+      if (!success) {
+        console.warn(`[Telegram Resilient Fallback] Sending chunk ${cIndex + 1} items individually to ensure 100% field delivery.`);
+        
+        // Send first item of this chunk linked with its caption (full text if first chunk, header continuation otherwise)
+        const firstItem = chunk[0];
+        const url = getAbsoluteMediaUrl(firstItem, baseUrl);
+        try {
+          if (isItemVideo(firstItem)) {
+            await sendTelegramVideo(chatId, url, chunkCaption, token, null, parseMode, baseUrl);
+          } else {
+            await sendTelegramPhoto(chatId, url, chunkCaption, token, null, parseMode, baseUrl);
+          }
+        } catch (individualErr) {
+          console.error(`Failed to send initial item of chunk ${cIndex + 1} individually:`, individualErr);
+        }
+
+        // Send remainder files in this chunk empty-captioned
+        if (chunk.length > 1) {
+          for (let k = 1; k < chunk.length; k++) {
+            const innerItem = chunk[k];
+            const itemUrl = getAbsoluteMediaUrl(innerItem, baseUrl);
+            try {
+              if (isItemVideo(innerItem)) {
+                await sendTelegramVideo(chatId, itemUrl, "", token, null, parseMode, baseUrl);
+              } else {
+                await sendTelegramPhoto(chatId, itemUrl, "", token, null, parseMode, baseUrl);
+              }
+            } catch (innerIndividualErr) {
+              console.error(`Failed to send item ${k + 1} of chunk ${cIndex + 1} individually:`, innerIndividualErr);
+            }
           }
         }
       }
     }
   } catch (err) {
-    console.error("Failed to send media group to Telegram:", err);
-    throw err;
+    console.error("Failed to execute sendTelegramMediaGroup processor:", err);
+    // As absolute last resort safety, try sending raw text format caption
+    try {
+      await sendTelegramMessage(chatId, caption, token, null, parseMode);
+    } catch (msgErr) {
+      console.error("Critical: Failed even to post raw fallback caption message:", msgErr);
+    }
   }
 }
 
