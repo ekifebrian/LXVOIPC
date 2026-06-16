@@ -346,11 +346,11 @@ app.post("/api/telegram-forward", async (req, res) => {
     const protocol = host.includes("localhost") || host.includes("127.0.0.1") ? "http" : "https";
     const baseUrl = `${protocol}://${host}`;
 
-    // 3. Format message in Indonesian and Chinese using robust HTML tags (prevents Markdown syntax parse failures)
+    // 3. Format message in Chinese using robust HTML tags (prevents Markdown syntax parse failures)
     let categoryLabel = building.category || "";
-    if (categoryLabel === "survey") categoryLabel = "踩点 / SURVEY";
-    else if (categoryLabel === "line") categoryLabel = "排线 / LINE";
-    else if (categoryLabel === "installation") categoryLabel = "安装 / INSTALLATION";
+    if (categoryLabel === "survey") categoryLabel = "勘测点 / 踩点";
+    else if (categoryLabel === "line") categoryLabel = "测量线 / 排线";
+    else if (categoryLabel === "installation") categoryLabel = "安装基站 / 调试";
     else categoryLabel = categoryLabel.toUpperCase();
 
     const escapeHtml = (text: string) => {
@@ -361,27 +361,27 @@ app.post("/api/telegram-forward", async (req, res) => {
         .replace(/>/g, "&gt;");
     };
 
-    const safeName = escapeHtml(building.name || "Situs Tanpa Nama");
-    const safeOperator = escapeHtml(building.operator || "N/A");
-    const safeOperationTime = escapeHtml(building.operationTime || "N/A");
-    const safeLocation = escapeHtml(building.location || "N/A");
+    const safeName = escapeHtml(building.name || "未命名站点");
+    const safeOperator = escapeHtml(building.operator || "无");
+    const safeOperationTime = escapeHtml(building.operationTime || "无");
+    const safeLocation = escapeHtml(building.location || "无");
 
     // Strictly limit description in caption to prevent Telegram API 400 Bad Request (Caption must be 0-1024 characters)
-    const rawDesc = building.description || "Tidak ada penjelasan tertulis / 暂无详细描述。";
+    const rawDesc = building.description || "暂无现场详细描述。";
     const truncatedDesc = rawDesc.length > 400 ? rawDesc.substring(0, 400) + "..." : rawDesc;
     const safeDescText = escapeHtml(truncatedDesc);
     const safeCategoryLabel = escapeHtml(categoryLabel);
 
     let techSpecsHtml = "";
     if (building.category === "survey") {
-      techSpecsHtml = `• 长途线路数量 (Long Distance Lines): <b>${building.longDistanceLines || 0}</b> 根\n• 本地线路数量 (Local Lines): <b>${building.localLines || 0}</b> 根`;
+      techSpecsHtml = `• 长途线路数量: <b>${building.longDistanceLines || 0}</b> 根\n• 本地线路数量: <b>${building.localLines || 0}</b> 根`;
     } else if (building.category === "line") {
-      techSpecsHtml = `• 长途电话数量 (Long Distance Phones): <b>${building.longDistancePhones || 0}</b> 台\n• 本地电话数量 (Local Phones): <b>${building.localPhones || 0}</b> 台`;
+      techSpecsHtml = `• 长途电话数量: <b>${building.longDistancePhones || 0}</b> 台\n• 本地电话数量: <b>${building.localPhones || 0}</b> 台`;
     } else if (building.category === "installation") {
-      techSpecsHtml = `• Jalur Jauh (Long Distance Lines): <b>${building.longDistanceLines || 0}</b> 根\n• Jalur Lokal (Local Lines): <b>${building.localLines || 0}</b> 根\n• 总时长 (Total Duration): <b>${building.totalDuration || 0}</b> 小时`;
+      techSpecsHtml = `• 长途线路数量: <b>${building.longDistanceLines || 0}</b> 根\n• 本地线路数量: <b>${building.localLines || 0}</b> 根\n• 部署总工时: <b>${building.totalDuration || 0}</b> 小时`;
     }
 
-    const textPayloadHtml = `🏢 <b>${safeName}</b>\n\n📌 <b>Kategori / 类别</b>: [${safeCategoryLabel}]\n👤 <b>Operator / 操作人</b>: ${safeOperator}\n⏰ <b>Waktu / 操作时间</b>: ${safeOperationTime}\n📍 <b>Lokasi / 地点</b>: ${safeLocation}\n\n🔌 <b>Spesifikasi Metrik Teknis / 技术指标</b>:\n${techSpecsHtml}\n\n📝 <b>Keterangan Lapangan / 描述</b>:\n${safeDescText}\n\n📋 <i>Dikirim langsung dari LXVOIP Web Admin Portal</i>`;
+    const textPayloadHtml = `🏢 <b>${safeName}</b>\n\n📌 <b>项目类别</b>: [${safeCategoryLabel}]\n👤 <b>操作人员</b>: ${safeOperator}\n⏰ <b>操作时间</b>: ${safeOperationTime}\n📍 <b>地理位置</b>: ${safeLocation}\n\n🔌 <b>核心技术指标</b>:\n${techSpecsHtml}\n\n📝 <b>现场详细描述</b>:\n${safeDescText}\n\n📋 <i>本数据由 LXVOIP 现场管理系统自动推送</i>`;
 
     // 4. Send with Photo or Media Group if gallery contains any media items
     if (building.gallery && building.gallery.length > 1) {
