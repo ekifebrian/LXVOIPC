@@ -214,6 +214,23 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [tabSearchQuery, setTabSearchQuery] = useState('');
 
+  // Virtualized dynamic list pagination levels for high FPS rendering speed
+  const [surveyLimit, setSurveyLimit] = useState(15);
+  const [lineLimit, setLineLimit] = useState(15);
+  const [installLimit, setInstallLimit] = useState(15);
+  const [searchLimit, setSearchLimit] = useState(15);
+
+  // Reset limits when filters vary so users always get standard lightweight load
+  useEffect(() => {
+    setSurveyLimit(15);
+    setLineLimit(15);
+    setInstallLimit(15);
+  }, [filterProvince, filterCity, tabSearchQuery]);
+
+  useEffect(() => {
+    setSearchLimit(15);
+  }, [searchQuery]);
+
   // Selected Detail Modal overlay
   const [selectedBuilding, setSelectedBuilding] = useState<Building | null>(null);
   const [editingBuilding, setEditingBuilding] = useState<Building | null>(null);
@@ -621,14 +638,15 @@ export default function App() {
   }, [activeRecords]);
 
   // Filter conditions
-  const getFilteredListForTab = (categoryKey: string) => {
+  const filteredSurveyList = useMemo(() => {
+    const searchStr = tabSearchQuery.toLowerCase().trim();
     return activeRecords.filter(item => {
-      const isCorrectTab = item.category === categoryKey;
+      if (item.category !== 'survey') return false;
       const matchesProvince = filterProvince === '全部' || item.province === filterProvince;
       const matchesCity = filterCity === '全部' || item.city === filterCity;
-      
-      const searchStr = tabSearchQuery.toLowerCase().trim();
-      const matchesSearch = !searchStr || (
+      if (!matchesProvince || !matchesCity) return false;
+      if (!searchStr) return true;
+      return (
         item.name?.toLowerCase().includes(searchStr) ||
         item.operator?.toLowerCase().includes(searchStr) ||
         item.location?.toLowerCase().includes(searchStr) ||
@@ -637,40 +655,106 @@ export default function App() {
         item.city?.toLowerCase().includes(searchStr) ||
         item.district?.toLowerCase().includes(searchStr)
       );
-
-      return isCorrectTab && matchesProvince && matchesCity && matchesSearch;
     });
+  }, [activeRecords, filterProvince, filterCity, tabSearchQuery]);
+
+  const filteredLineList = useMemo(() => {
+    const searchStr = tabSearchQuery.toLowerCase().trim();
+    return activeRecords.filter(item => {
+      if (item.category !== 'line') return false;
+      const matchesProvince = filterProvince === '全部' || item.province === filterProvince;
+      const matchesCity = filterCity === '全部' || item.city === filterCity;
+      if (!matchesProvince || !matchesCity) return false;
+      if (!searchStr) return true;
+      return (
+        item.name?.toLowerCase().includes(searchStr) ||
+        item.operator?.toLowerCase().includes(searchStr) ||
+        item.location?.toLowerCase().includes(searchStr) ||
+        item.description?.toLowerCase().includes(searchStr) ||
+        item.province?.toLowerCase().includes(searchStr) ||
+        item.city?.toLowerCase().includes(searchStr) ||
+        item.district?.toLowerCase().includes(searchStr)
+      );
+    });
+  }, [activeRecords, filterProvince, filterCity, tabSearchQuery]);
+
+  const filteredInstallList = useMemo(() => {
+    const searchStr = tabSearchQuery.toLowerCase().trim();
+    return activeRecords.filter(item => {
+      if (item.category !== 'installation') return false;
+      const matchesProvince = filterProvince === '全部' || item.province === filterProvince;
+      const matchesCity = filterCity === '全部' || item.city === filterCity;
+      if (!matchesProvince || !matchesCity) return false;
+      if (!searchStr) return true;
+      return (
+        item.name?.toLowerCase().includes(searchStr) ||
+        item.operator?.toLowerCase().includes(searchStr) ||
+        item.location?.toLowerCase().includes(searchStr) ||
+        item.description?.toLowerCase().includes(searchStr) ||
+        item.province?.toLowerCase().includes(searchStr) ||
+        item.city?.toLowerCase().includes(searchStr) ||
+        item.district?.toLowerCase().includes(searchStr)
+      );
+    });
+  }, [activeRecords, filterProvince, filterCity, tabSearchQuery]);
+
+  const getFilteredListForTab = (categoryKey: string) => {
+    if (categoryKey === 'survey') return filteredSurveyList;
+    if (categoryKey === 'line') return filteredLineList;
+    if (categoryKey === 'installation') return filteredInstallList;
+    return [];
   };
 
   // General searching results list (Search Center Tab)
-  const searchResultsList = activeRecords.filter(item => {
-    // If the sidebar search range is filtered
-    const tabMatch = 
-      sidebarTab === 'search_center' || 
-      (sidebarTab === 'survey_data' && item.category === 'survey') ||
-      (sidebarTab === 'line_data' && item.category === 'line') ||
-      (sidebarTab === 'install_data' && item.category === 'installation');
+  const searchResultsList = useMemo(() => {
+    const searchStr = searchQuery.toLowerCase().trim();
+    return activeRecords.filter(item => {
+      // If the sidebar search range is filtered
+      const tabMatch = 
+        sidebarTab === 'search_center' || 
+        (sidebarTab === 'survey_data' && item.category === 'survey') ||
+        (sidebarTab === 'line_data' && item.category === 'line') ||
+        (sidebarTab === 'install_data' && item.category === 'installation');
 
-    const searchStr = searchQuery.toLowerCase();
-    const queryMatch = 
-      item.name?.toLowerCase().includes(searchStr) ||
-      item.operator?.toLowerCase().includes(searchStr) ||
-      item.location?.toLowerCase().includes(searchStr) ||
-      item.description?.toLowerCase().includes(searchStr) ||
-      item.category?.toLowerCase().includes(searchStr);
+      if (!tabMatch) return false;
+      if (!searchStr) return true;
 
-    return queryMatch;
-  });
+      return (
+        item.name?.toLowerCase().includes(searchStr) ||
+        item.operator?.toLowerCase().includes(searchStr) ||
+        item.location?.toLowerCase().includes(searchStr) ||
+        item.description?.toLowerCase().includes(searchStr) ||
+        item.category?.toLowerCase().includes(searchStr)
+      );
+    });
+  }, [activeRecords, sidebarTab, searchQuery]);
 
-  // Calculate high-fidelity metrics counters
-  const totalLogsCount = activeRecords.length;
-  const surveyLogsCount = activeRecords.filter(r => r.category === 'survey').length;
-  const lineLogsCount = activeRecords.filter(r => r.category === 'line').length;
-  const installationLogsCount = activeRecords.filter(r => r.category === 'installation').length;
+  // Calculate high-fidelity metrics counters using single-pass calculation
+  const { totalLogsCount, surveyLogsCount, lineLogsCount, installationLogsCount } = useMemo(() => {
+    let sCount = 0;
+    let lCount = 0;
+    let iCount = 0;
+    for (const r of activeRecords) {
+      if (r.category === 'survey') sCount++;
+      else if (r.category === 'line') lCount++;
+      else if (r.category === 'installation') iCount++;
+    }
+    return {
+      totalLogsCount: activeRecords.length,
+      surveyLogsCount: sCount,
+      lineLogsCount: lCount,
+      installationLogsCount: iCount
+    };
+  }, [activeRecords]);
 
-  // Extract unique filter categories list for lists dropdowns
-  const availableProvinces = Array.from(new Set(activeRecords.map(r => r.province || '江西省')));
-  const availableCities = Array.from(new Set(activeRecords.map(r => r.city || '鹰潭市')));
+  // Extract unique filter categories list for lists dropdowns - memoized for blazing-fast speed
+  const availableProvinces = useMemo(() => {
+    return Array.from(new Set(activeRecords.map(r => r.province || '江西省')));
+  }, [activeRecords]);
+
+  const availableCities = useMemo(() => {
+    return Array.from(new Set(activeRecords.map(r => r.city || '鹰潭市')));
+  }, [activeRecords]);
 
   // Trigger seeding to cloud
   const handleSeedCloudDatabase = async () => {
@@ -1340,53 +1424,87 @@ export default function App() {
                 </div>
 
               ) : (
+                <div className="flex flex-col gap-6">
+                  <div className="grid grid-cols-1 gap-4">
+                    {sidebarTab === 'survey_data' && getFilteredListForTab('survey').slice(0, surveyLimit).map((rec, idx) => (
+                      <BuildingCard
+                        key={rec.id}
+                        building={rec}
+                        onSelect={setSelectedBuilding}
+                        lang={lang}
+                        isAdmin={isAdmin || isSurveyor}
+                        onEdit={handleTriggerEdit}
+                        onDelete={handleDeleteRecord}
+                        index={idx + 1}
+                      />
+                    ))}
+                    {sidebarTab === 'line_data' && getFilteredListForTab('line').slice(0, lineLimit).map((rec, idx) => (
+                      <BuildingCard
+                        key={rec.id}
+                        building={rec}
+                        onSelect={setSelectedBuilding}
+                        lang={lang}
+                        isAdmin={isAdmin || isSurveyor}
+                        onEdit={handleTriggerEdit}
+                        onDelete={handleDeleteRecord}
+                        index={idx + 1}
+                      />
+                    ))}
+                    {sidebarTab === 'install_data' && getFilteredListForTab('installation').slice(0, installLimit).map((rec, idx) => (
+                      <BuildingCard
+                        key={rec.id}
+                        building={rec}
+                        onSelect={setSelectedBuilding}
+                        lang={lang}
+                        isAdmin={isAdmin || isSurveyor}
+                        onEdit={handleTriggerEdit}
+                        onDelete={handleDeleteRecord}
+                        index={idx + 1}
+                      />
+                    ))}
+                  </div>
 
-                <div className="grid grid-cols-1 gap-4">
-                  {sidebarTab === 'survey_data' && getFilteredListForTab('survey').map((rec, idx) => (
-                    <BuildingCard
-                      key={rec.id}
-                      building={rec}
-                      onSelect={setSelectedBuilding}
-                      lang={lang}
-                      isAdmin={isAdmin || isSurveyor}
-                      onEdit={handleTriggerEdit}
-                      onDelete={handleDeleteRecord}
-                      index={idx + 1}
-                    />
-                  ))}
-                  {sidebarTab === 'line_data' && getFilteredListForTab('line').map((rec, idx) => (
-                    <BuildingCard
-                      key={rec.id}
-                      building={rec}
-                      onSelect={setSelectedBuilding}
-                      lang={lang}
-                      isAdmin={isAdmin || isSurveyor}
-                      onEdit={handleTriggerEdit}
-                      onDelete={handleDeleteRecord}
-                      index={idx + 1}
-                    />
-                  ))}
-                  {sidebarTab === 'install_data' && getFilteredListForTab('installation').map((rec, idx) => (
-                    <BuildingCard
-                      key={rec.id}
-                      building={rec}
-                      onSelect={setSelectedBuilding}
-                      lang={lang}
-                      isAdmin={isAdmin || isSurveyor}
-                      onEdit={handleTriggerEdit}
-                      onDelete={handleDeleteRecord}
-                      index={idx + 1}
-                    />
-                  ))}
+                  {/* Load More buttons for Category lists */}
+                  {sidebarTab === 'survey_data' && getFilteredListForTab('survey').length > surveyLimit && (
+                    <div className="flex justify-center mt-2">
+                      <button
+                        onClick={() => setSurveyLimit(prev => prev + 15)}
+                        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl transition text-xs shadow-md shadow-blue-500/15 cursor-pointer flex items-center gap-1.5 border border-blue-700"
+                      >
+                        {lang === 'id' ? 'Tampilkan Lebih Banyak (Survey)' : '加载更多勘测数据'}
+                      </button>
+                    </div>
+                  )}
+
+                  {sidebarTab === 'line_data' && getFilteredListForTab('line').length > lineLimit && (
+                    <div className="flex justify-center mt-2">
+                      <button
+                        onClick={() => setLineLimit(prev => prev + 15)}
+                        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl transition text-xs shadow-md shadow-blue-500/15 cursor-pointer flex items-center gap-1.5 border border-blue-700"
+                      >
+                        {lang === 'id' ? 'Tampilkan Lebih Banyak (Line)' : '加载更多测线数据'}
+                      </button>
+                    </div>
+                  )}
+
+                  {sidebarTab === 'install_data' && getFilteredListForTab('installation').length > installLimit && (
+                    <div className="flex justify-center mt-2">
+                      <button
+                        onClick={() => setInstallLimit(prev => prev + 15)}
+                        className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl transition text-xs shadow-md shadow-blue-500/15 cursor-pointer flex items-center gap-1.5 border border-blue-700"
+                      >
+                        {lang === 'id' ? 'Tampilkan Lebih Banyak (Install)' : '加载更多安装数据'}
+                      </button>
+                    </div>
+                  )}
                 </div>
-
               )}
 
             </div>
           )}
 
-          {/* TAB 5: 可视化点位分布图 (Visual Point Distribution map grid) */}
-          {sidebarTab === 'map_view' && (
+          {/* TAB 5: 可视化点位分布图 (Visual Point Distribution map grid) - Kept in-memory hidden to prevent Leaflet rebuilding lag */}
+          <div className={sidebarTab === 'map_view' ? 'block' : 'hidden'}>
             <InteractiveMap
               activeRecords={activeRecords}
               selectedMapPoint={selectedMapPoint}
@@ -1394,8 +1512,9 @@ export default function App() {
               lang={lang}
               t={t}
               onShowDetails={setSelectedBuilding}
+              sidebarTab={sidebarTab}
             />
-          )}
+          </div>
 
           {/* TAB 6: 数据检索中心 (Data Search Center) */}
           {sidebarTab === 'search_center' && (
@@ -1433,18 +1552,32 @@ export default function App() {
                     <p className="text-xs text-slate-400 max-w-xs">{t.noRecordsDesc}</p>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 gap-4">
-                    {searchResultsList.map((item) => (
-                      <BuildingCard
-                        key={item.id}
-                        building={item}
-                        onSelect={setSelectedBuilding}
-                        lang={lang}
-                        isAdmin={isAdmin || isSurveyor}
-                        onEdit={handleTriggerEdit}
-                        onDelete={handleDeleteRecord}
-                      />
-                    ))}
+                  <div className="flex flex-col gap-6">
+                    <div className="grid grid-cols-1 gap-4">
+                      {searchResultsList.slice(0, searchLimit).map((item) => (
+                        <BuildingCard
+                          key={item.id}
+                          building={item}
+                          onSelect={setSelectedBuilding}
+                          lang={lang}
+                          isAdmin={isAdmin || isSurveyor}
+                          onEdit={handleTriggerEdit}
+                          onDelete={handleDeleteRecord}
+                        />
+                      ))}
+                    </div>
+
+                    {/* Load More buttons for Search list */}
+                    {searchResultsList.length > searchLimit && (
+                      <div className="flex justify-center mt-2 animate-fade-in">
+                        <button
+                          onClick={() => setSearchLimit(prev => prev + 15)}
+                          className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-extrabold rounded-xl transition text-xs shadow-md shadow-blue-500/15 cursor-pointer flex items-center gap-1.5 border border-blue-700"
+                        >
+                          {lang === 'id' ? 'Tampilkan Lebih Banyak (Search)' : '加载更多检索数据'}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
