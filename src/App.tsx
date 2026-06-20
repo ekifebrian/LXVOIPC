@@ -1503,8 +1503,8 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 5: 可视化点位分布图 (Visual Point Distribution map grid) - Kept in-memory hidden to prevent Leaflet rebuilding lag */}
-          <div className={sidebarTab === 'map_view' ? 'block' : 'hidden'}>
+          {/* TAB 5: 可视化点位分布图 (Visual Point Distribution map grid) */}
+          {sidebarTab === 'map_view' && (
             <InteractiveMap
               activeRecords={activeRecords}
               selectedMapPoint={selectedMapPoint}
@@ -1512,9 +1512,8 @@ export default function App() {
               lang={lang}
               t={t}
               onShowDetails={setSelectedBuilding}
-              sidebarTab={sidebarTab}
             />
-          </div>
+          )}
 
           {/* TAB 6: 数据检索中心 (Data Search Center) */}
           {sidebarTab === 'search_center' && (

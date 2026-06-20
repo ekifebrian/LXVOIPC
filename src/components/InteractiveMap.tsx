@@ -154,6 +154,20 @@ export default function InteractiveMap({
   const [mapMode, setMapMode] = useState<MapMode>('interactive');
   const [tileProvider, setTileProvider] = useState<TileProvider>('gaode');
 
+  // Trigger multiple staggered map invalidateSize operations on-mount to handle frame animations and fully capture container dimensions
+  useEffect(() => {
+    const timers = [50, 150, 300, 600, 1200].map(delay => 
+      setTimeout(() => {
+        if (mapInstanceRef.current) {
+          mapInstanceRef.current.invalidateSize();
+        }
+      }, delay)
+    );
+    return () => {
+      timers.forEach(clearTimeout);
+    };
+  }, []);
+
   // HIGH-ACCURACY MAP STATES FOR PRECISE ROAD-ROUTING, DYNAMIC SUB-ENTRANCE CHIPS AND PREMIUM AI DEEP SEARCH
   const [activeRouting, setActiveRouting] = useState<[number, number][] | null>(null);
   const [routingInfo, setRoutingInfo] = useState<{ targetName: string; distance: string; duration: string } | null>(null);
